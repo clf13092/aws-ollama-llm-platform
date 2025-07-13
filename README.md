@@ -1,5 +1,7 @@
 # AWS Ollama LLM Platform
 
+[🇯🇵 日本語版README](./README.ja.md) | [🇺🇸 English README](./README.md)
+
 🚀 **Dynamic Ollama LLM deployment on AWS with secure authentication and one-click CloudFormation setup**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
