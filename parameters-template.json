@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "ollama.yourdomain.com"
+  },
+  {
+    "ParameterKey": "AdminEmail",
+    "ParameterValue": "admin@yourdomain.com"
+  },
+  {
+    "ParameterKey": "EnableMFA",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "DBInstanceClass",
+    "ParameterValue": "db.t3.micro"
+  }
+]

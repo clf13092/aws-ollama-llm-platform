@@ -1,0 +1,489 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Storage layer for AWS Ollama Platform - DynamoDB Tables'
+
+Parameters:
+  Environment:
+    Type: String
+    Description: 'Environment name for resource naming'
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Resources:
+  # Models Table - Stores available model definitions
+  ModelsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-ollama-models'
+      BillingMode: !If [IsProduction, 'PROVISIONED', 'PAY_PER_REQUEST']
+      ProvisionedThroughput: !If 
+        - IsProduction
+        - ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+        - !Ref AWS::NoValue
+      AttributeDefinitions:
+        - AttributeName: model_id
+          AttributeType: S
+        - AttributeName: model_family
+          AttributeType: S
+      KeySchema:
+        - AttributeName: model_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ModelFamilyIndex
+          KeySchema:
+            - AttributeName: model_family
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput: !If 
+            - IsProduction
+            - ReadCapacityUnits: 2
+              WriteCapacityUnits: 2
+            - !Ref AWS::NoValue
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProduction, true, false]
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+        - Key: TableType
+          Value: 'Models'
+
+  # Instances Table - Stores running model instances
+  InstancesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-ollama-instances'
+      BillingMode: !If [IsProduction, 'PROVISIONED', 'PAY_PER_REQUEST']
+      ProvisionedThroughput: !If 
+        - IsProduction
+        - ReadCapacityUnits: 10
+          WriteCapacityUnits: 10
+        - !Ref AWS::NoValue
+      AttributeDefinitions:
+        - AttributeName: instance_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: instance_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput: !If 
+            - IsProduction
+            - ReadCapacityUnits: 5
+              WriteCapacityUnits: 5
+            - !Ref AWS::NoValue
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput: !If 
+            - IsProduction
+            - ReadCapacityUnits: 3
+              WriteCapacityUnits: 3
+            - !Ref AWS::NoValue
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProduction, true, false]
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+        - Key: TableType
+          Value: 'Instances'
+
+  # Users Table - Stores user metadata and preferences
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-ollama-users'
+      BillingMode: !If [IsProduction, 'PROVISIONED', 'PAY_PER_REQUEST']
+      ProvisionedThroughput: !If 
+        - IsProduction
+        - ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+        - !Ref AWS::NoValue
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: cognito_sub
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CognitoSubIndex
+          KeySchema:
+            - AttributeName: cognito_sub
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput: !If 
+            - IsProduction
+            - ReadCapacityUnits: 2
+              WriteCapacityUnits: 2
+            - !Ref AWS::NoValue
+        - IndexName: EmailIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput: !If 
+            - IsProduction
+            - ReadCapacityUnits: 2
+              WriteCapacityUnits: 2
+            - !Ref AWS::NoValue
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProduction, true, false]
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+        - Key: TableType
+          Value: 'Users'
+
+  # Usage Logs Table - Stores API usage and billing information
+  UsageLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-ollama-usage-logs'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: log_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: instance_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: log_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserTimestampIndex
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: InstanceTimestampIndex
+          KeySchema:
+            - AttributeName: instance_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+        - Key: TableType
+          Value: 'UsageLogs'
+
+  # Lambda function to populate initial data
+  PopulateInitialDataFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-ollama-populate-initial-data'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt PopulateDataLambdaRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          MODELS_TABLE_NAME: !Ref ModelsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          from datetime import datetime, timezone
+          
+          def lambda_handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  models_table = dynamodb.Table(event['ResourceProperties']['ModelsTableName'])
+                  
+                  if event['RequestType'] == 'Create':
+                      # Populate initial model data
+                      initial_models = [
+                          {
+                              'model_id': 'llama2-7b',
+                              'model_name': 'Llama2 7B',
+                              'model_family': 'llama2',
+                              'image_uri': 'ollama/ollama:latest',
+                              'model_size_gb': 4,
+                              'cpu_requirements': {
+                                  'vcpu': 2,
+                                  'memory_mb': 4096
+                              },
+                              'gpu_requirements': {
+                                  'gpu_memory_mb': 8192,
+                                  'gpu_type': 'any'
+                              },
+                              'description': 'Meta Llama 2 7B parameter model for general-purpose use',
+                              'supported_tasks': ['chat', 'completion', 'qa'],
+                              'created_at': datetime.now(timezone.utc).isoformat(),
+                              'is_active': True
+                          },
+                          {
+                              'model_id': 'llama2-13b',
+                              'model_name': 'Llama2 13B',
+                              'model_family': 'llama2',
+                              'image_uri': 'ollama/ollama:latest',
+                              'model_size_gb': 8,
+                              'cpu_requirements': {
+                                  'vcpu': 4,
+                                  'memory_mb': 8192
+                              },
+                              'gpu_requirements': {
+                                  'gpu_memory_mb': 16384,
+                                  'gpu_type': 'any'
+                              },
+                              'description': 'Meta Llama 2 13B parameter model for enhanced performance',
+                              'supported_tasks': ['chat', 'completion', 'qa'],
+                              'created_at': datetime.now(timezone.utc).isoformat(),
+                              'is_active': True
+                          },
+                          {
+                              'model_id': 'codellama-7b',
+                              'model_name': 'Code Llama 7B',
+                              'model_family': 'codellama',
+                              'image_uri': 'ollama/ollama:latest',
+                              'model_size_gb': 4,
+                              'cpu_requirements': {
+                                  'vcpu': 2,
+                                  'memory_mb': 4096
+                              },
+                              'gpu_requirements': {
+                                  'gpu_memory_mb': 8192,
+                                  'gpu_type': 'any'
+                              },
+                              'description': 'Code Llama 7B specialized for code generation and completion',
+                              'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
+                              'created_at': datetime.now(timezone.utc).isoformat(),
+                              'is_active': True
+                          },
+                          {
+                              'model_id': 'mistral-7b',
+                              'model_name': 'Mistral 7B',
+                              'model_family': 'mistral',
+                              'image_uri': 'ollama/ollama:latest',
+                              'model_size_gb': 4,
+                              'cpu_requirements': {
+                                  'vcpu': 2,
+                                  'memory_mb': 4096
+                              },
+                              'gpu_requirements': {
+                                  'gpu_memory_mb': 8192,
+                                  'gpu_type': 'any'
+                              },
+                              'description': 'Mistral 7B high-performance language model',
+                              'supported_tasks': ['chat', 'completion', 'qa'],
+                              'created_at': datetime.now(timezone.utc).isoformat(),
+                              'is_active': True
+                          }
+                      ]
+                      
+                      # Batch write items
+                      with models_table.batch_writer() as batch:
+                          for model in initial_models:
+                              batch.put_item(Item=model)
+                      
+                      print(f"Successfully populated {len(initial_models)} initial models")
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  PopulateDataLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt ModelsTable.Arn
+
+  # Custom resource to trigger initial data population
+  PopulateInitialData:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: ModelsTable
+    Properties:
+      ServiceToken: !GetAtt PopulateInitialDataFunction.Arn
+      ModelsTableName: !Ref ModelsTable
+
+  # CloudWatch Alarms for table monitoring
+  ModelsTableThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProduction
+    Properties:
+      AlarmName: !Sub '${Environment}-ollama-models-table-throttle'
+      AlarmDescription: 'Models table is experiencing throttling'
+      MetricName: 'ReadThrottleEvents'
+      Namespace: 'AWS/DynamoDB'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref ModelsTable
+      AlarmActions:
+        - !Ref SNSTopicForAlerts
+
+  InstancesTableThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProduction
+    Properties:
+      AlarmName: !Sub '${Environment}-ollama-instances-table-throttle'
+      AlarmDescription: 'Instances table is experiencing throttling'
+      MetricName: 'ReadThrottleEvents'
+      Namespace: 'AWS/DynamoDB'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref InstancesTable
+      AlarmActions:
+        - !Ref SNSTopicForAlerts
+
+  # SNS Topic for DynamoDB alerts
+  SNSTopicForAlerts:
+    Type: AWS::SNS::Topic
+    Condition: IsProduction
+    Properties:
+      TopicName: !Sub '${Environment}-ollama-dynamodb-alerts'
+      DisplayName: 'AWS Ollama Platform - DynamoDB Alerts'
+
+Outputs:
+  ModelsTableName:
+    Description: 'Models table name'
+    Value: !Ref ModelsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-ModelsTableName'
+
+  ModelsTableArn:
+    Description: 'Models table ARN'
+    Value: !GetAtt ModelsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ModelsTableArn'
+
+  InstancesTableName:
+    Description: 'Instances table name'
+    Value: !Ref InstancesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-InstancesTableName'
+
+  InstancesTableArn:
+    Description: 'Instances table ARN'
+    Value: !GetAtt InstancesTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InstancesTableArn'
+
+  UsersTableName:
+    Description: 'Users table name'
+    Value: !Ref UsersTable
+    Export:
+      Name: !Sub '${AWS::StackName}-UsersTableName'
+
+  UsersTableArn:
+    Description: 'Users table ARN'
+    Value: !GetAtt UsersTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UsersTableArn'
+
+  UsageLogsTableName:
+    Description: 'Usage logs table name'
+    Value: !Ref UsageLogsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-UsageLogsTableName'
+
+  UsageLogsTableArn:
+    Description: 'Usage logs table ARN'
+    Value: !GetAtt UsageLogsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UsageLogsTableArn'
+
+  ModelsTableStreamArn:
+    Description: 'Models table stream ARN'
+    Value: !GetAtt ModelsTable.StreamArn
+    Export:
+      Name: !Sub '${AWS::StackName}-ModelsTableStreamArn'
+
+  InstancesTableStreamArn:
+    Description: 'Instances table stream ARN'
+    Value: !GetAtt InstancesTable.StreamArn
+    Export:
+      Name: !Sub '${AWS::StackName}-InstancesTableStreamArn'

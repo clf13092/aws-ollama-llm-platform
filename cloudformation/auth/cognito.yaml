@@ -1,0 +1,521 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Authentication layer for AWS Ollama Platform - AWS Cognito User Pool and Identity Pool'
+
+Parameters:
+  Environment:
+    Type: String
+    Description: 'Environment name for resource naming'
+  
+  DomainName:
+    Type: String
+    Description: 'Domain name for the platform'
+  
+  AdminEmail:
+    Type: String
+    Description: 'Email address for the initial admin user'
+  
+  EnableMFA:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable Multi-Factor Authentication for users'
+
+Conditions:
+  EnableMFACondition: !Equals [!Ref EnableMFA, 'true']
+
+Resources:
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-ollama-users'
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      EmailVerificationMessage: 'Welcome to AWS Ollama Platform! Your verification code is {####}'
+      EmailVerificationSubject: 'AWS Ollama Platform - Verify your email'
+      MfaConfiguration: !If [EnableMFACondition, 'ON', 'OFF']
+      EnabledMfas: !If 
+        - EnableMFACondition
+        - ['SMS_MFA', 'SOFTWARE_TOKEN_MFA']
+        - !Ref AWS::NoValue
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          DeveloperOnlyAttribute: false
+      UserPoolTags:
+        Environment: !Ref Environment
+        Project: 'aws-ollama-platform'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageAction: SUPPRESS
+        TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UsernameConfiguration:
+        CaseSensitive: false
+
+  # User Pool Domain
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub '${Environment}-ollama-auth-${AWS::AccountId}'
+
+  # User Pool Client for Web Application
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub '${Environment}-ollama-web-client'
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Sub 'https://${DomainName}/auth/callback'
+        - 'http://localhost:3000/auth/callback'  # For local development
+      LogoutURLs:
+        - !Sub 'https://${DomainName}/auth/logout'
+        - 'http://localhost:3000/auth/logout'   # For local development
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - phone
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: minutes
+        IdToken: minutes
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+  # User Pool Client for API Access (with client secret)
+  UserPoolClientAPI:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub '${Environment}-ollama-api-client'
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: minutes
+        IdToken: minutes
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+  # Identity Pool for AWS Resource Access
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${Environment}_ollama_identity_pool'
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+        - ClientId: !Ref UserPoolClientAPI
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  # IAM Role for Authenticated Users
+  CognitoAuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ollama-authenticated-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: CognitoAuthenticatedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-sync:*
+                  - cognito-identity:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cognito/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Identity Pool Role Attachment
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthenticatedRole.Arn
+
+  # User Groups for Role-Based Access Control
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: 'Administrators'
+      Description: 'Administrator users with full access'
+      UserPoolId: !Ref UserPool
+      Precedence: 1
+      RoleArn: !GetAtt AdminGroupRole.Arn
+
+  UserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: 'Users'
+      Description: 'Standard users with limited access'
+      UserPoolId: !Ref UserPool
+      Precedence: 2
+      RoleArn: !GetAtt UserGroupRole.Arn
+
+  ReadOnlyGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: 'ReadOnly'
+      Description: 'Read-only users'
+      UserPoolId: !Ref UserPool
+      Precedence: 3
+      RoleArn: !GetAtt ReadOnlyGroupRole.Arn
+
+  # IAM Roles for User Groups
+  AdminGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ollama-admin-group-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+      Policies:
+        - PolicyName: AdminGroupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:*
+                  - dynamodb:*
+                  - logs:*
+                  - cloudwatch:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  UserGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ollama-user-group-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+      Policies:
+        - PolicyName: UserGroupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: '*'
+                Condition:
+                  ForAllValues:StringEquals:
+                    'dynamodb:LeadingKeys': ['${cognito-identity.amazonaws.com:sub}']
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:GetLogEvents
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  ReadOnlyGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ollama-readonly-group-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+      Policies:
+        - PolicyName: ReadOnlyGroupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:GetLogEvents
+                  - ecs:DescribeServices
+                  - ecs:DescribeTasks
+                  - ecs:DescribeClusters
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Lambda function for custom message trigger
+  CustomMessageLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-ollama-cognito-custom-message'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomMessageLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          
+          def lambda_handler(event, context):
+              if event['triggerSource'] == 'CustomMessage_AdminCreateUser':
+                  event['response']['emailSubject'] = 'Welcome to AWS Ollama Platform'
+                  event['response']['emailMessage'] = f"""
+                  Welcome to AWS Ollama Platform!
+                  
+                  Your temporary credentials:
+                  Username: {event['userName']}
+                  Temporary Password: {event['request']['codeParameter']}
+                  
+                  Please log in and change your password: https://{event['request']['clientMetadata']['domain'] if 'clientMetadata' in event['request'] and 'domain' in event['request']['clientMetadata'] else 'your-domain.com'}
+                  
+                  Best regards,
+                  AWS Ollama Platform Team
+                  """
+              elif event['triggerSource'] == 'CustomMessage_ForgotPassword':
+                  event['response']['emailSubject'] = 'AWS Ollama Platform - Password Reset'
+                  event['response']['emailMessage'] = f"""
+                  Password Reset Request
+                  
+                  Your verification code: {event['request']['codeParameter']}
+                  
+                  If you did not request this, please ignore this email.
+                  """
+              
+              return event
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  CustomMessageLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Permission for Cognito to invoke Lambda
+  CognitoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CustomMessageLambda
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # Update User Pool with Lambda Trigger
+  UserPoolLambdaConfig:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-ollama-users'
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      LambdaConfig:
+        CustomMessage: !GetAtt CustomMessageLambda.Arn
+      MfaConfiguration: !If [EnableMFACondition, 'ON', 'OFF']
+      EnabledMfas: !If 
+        - EnableMFACondition
+        - ['SMS_MFA', 'SOFTWARE_TOKEN_MFA']
+        - !Ref AWS::NoValue
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          DeveloperOnlyAttribute: false
+      UserPoolTags:
+        Environment: !Ref Environment
+        Project: 'aws-ollama-platform'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageAction: SUPPRESS
+        TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UsernameConfiguration:
+        CaseSensitive: false
+
+Outputs:
+  UserPoolId:
+    Description: 'Cognito User Pool ID'
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolClientId:
+    Description: 'Cognito User Pool Client ID for Web Application'
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+
+  UserPoolClientAPIId:
+    Description: 'Cognito User Pool Client ID for API Access'
+    Value: !Ref UserPoolClientAPI
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientAPIId'
+
+  UserPoolArn:
+    Description: 'Cognito User Pool ARN'
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolArn'
+
+  IdentityPoolId:
+    Description: 'Cognito Identity Pool ID'
+    Value: !Ref IdentityPool
+    Export:
+      Name: !Sub '${AWS::StackName}-IdentityPoolId'
+
+  CognitoDomain:
+    Description: 'Cognito Domain for authentication'
+    Value: !Sub 'https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoDomain'
+
+  AdminGroupName:
+    Description: 'Admin Group Name'
+    Value: !Ref AdminGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AdminGroupName'
+
+  UserGroupName:
+    Description: 'User Group Name'
+    Value: !Ref UserGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-UserGroupName'
+
+  ReadOnlyGroupName:
+    Description: 'ReadOnly Group Name'
+    Value: !Ref ReadOnlyGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ReadOnlyGroupName'
+
+  AuthenticatedRoleArn:
+    Description: 'IAM Role ARN for authenticated users'
+    Value: !GetAtt CognitoAuthenticatedRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AuthenticatedRoleArn'

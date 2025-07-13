@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Ollama LLM Platform - Master Template with Authentication'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name for resource naming and configuration'
+  
+  DomainName:
+    Type: String
+    Description: 'Domain name for the platform (e.g., ollama.yourdomain.com)'
+    Default: 'ollama.example.com'
+  
+  AdminEmail:
+    Type: String
+    Description: 'Email address for the initial admin user'
+    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    ConstraintDescription: 'Must be a valid email address'
+  
+  EnableMFA:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable Multi-Factor Authentication for users'
+  
+  CertificateArn:
+    Type: String
+    Description: 'ARN of the SSL certificate for HTTPS (optional, will create self-signed if not provided)'
+    Default: ''
+  
+  DBInstanceClass:
+    Type: String
+    Default: 'db.t3.micro'
+    AllowedValues: ['db.t3.micro', 'db.t3.small', 'db.t3.medium']
+    Description: 'DynamoDB billing mode and capacity'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+          - DomainName
+      - Label:
+          default: "Security Configuration"
+        Parameters:
+          - AdminEmail
+          - EnableMFA
+          - CertificateArn
+      - Label:
+          default: "Infrastructure Configuration"
+        Parameters:
+          - DBInstanceClass
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  EnableMFACondition: !Equals [!Ref EnableMFA, 'true']
+
+Resources:
+  # Network Layer - VPC, Subnets, Gateways
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './network/vpc.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Security Layer - IAM Roles and Policies
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './security/iam.yaml'
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Authentication Layer - AWS Cognito
+  AuthStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './auth/cognito.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+        AdminEmail: !Ref AdminEmail
+        EnableMFA: !Ref EnableMFA
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Storage Layer - DynamoDB Tables
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './storage/dynamodb.yaml'
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # API Layer - Lambda Functions and API Gateway
+  APIStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - NetworkStack
+      - SecurityStack
+      - AuthStack
+      - StorageStack
+    Properties:
+      TemplateURL: './api/api-gateway.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        VPCId: !GetAtt NetworkStack.Outputs.VPCId
+        PrivateSubnetIds: !GetAtt NetworkStack.Outputs.PrivateSubnetIds
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+        UserPoolClientId: !GetAtt AuthStack.Outputs.UserPoolClientId
+        ModelsTableName: !GetAtt StorageStack.Outputs.ModelsTableName
+        InstancesTableName: !GetAtt StorageStack.Outputs.InstancesTableName
+        UsersTableName: !GetAtt StorageStack.Outputs.UsersTableName
+        LambdaExecutionRole: !GetAtt SecurityStack.Outputs.LambdaExecutionRole
+        ECSTaskRole: !GetAtt SecurityStack.Outputs.ECSTaskRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Compute Layer - ECS Cluster and Services
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - NetworkStack
+      - SecurityStack
+    Properties:
+      TemplateURL: './compute/ecs-cluster.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        VPCId: !GetAtt NetworkStack.Outputs.VPCId
+        PrivateSubnetIds: !GetAtt NetworkStack.Outputs.PrivateSubnetIds
+        PublicSubnetIds: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+        ECSTaskRole: !GetAtt SecurityStack.Outputs.ECSTaskRole
+        ECSExecutionRole: !GetAtt SecurityStack.Outputs.ECSExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Frontend Layer - S3 and CloudFront
+  FrontendStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - AuthStack
+      - APIStack
+    Properties:
+      TemplateURL: './frontend/s3-cloudfront.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+        CertificateArn: !Ref CertificateArn
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+        UserPoolClientId: !GetAtt AuthStack.Outputs.UserPoolClientId
+        APIGatewayURL: !GetAtt APIStack.Outputs.APIGatewayURL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+Outputs:
+  # Network Outputs
+  VPCId:
+    Description: 'VPC ID for the Ollama platform'
+    Value: !GetAtt NetworkStack.Outputs.VPCId
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCId'
+
+  # Authentication Outputs
+  UserPoolId:
+    Description: 'Cognito User Pool ID'
+    Value: !GetAtt AuthStack.Outputs.UserPoolId
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+  
+  UserPoolClientId:
+    Description: 'Cognito User Pool Client ID'
+    Value: !GetAtt AuthStack.Outputs.UserPoolClientId
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+  
+  CognitoDomain:
+    Description: 'Cognito Domain for authentication'
+    Value: !GetAtt AuthStack.Outputs.CognitoDomain
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoDomain'
+
+  # API Outputs
+  APIGatewayURL:
+    Description: 'API Gateway URL for the platform'
+    Value: !GetAtt APIStack.Outputs.APIGatewayURL
+    Export:
+      Name: !Sub '${AWS::StackName}-APIGatewayURL'
+
+  # Compute Outputs
+  ECSClusterName:
+    Description: 'ECS Cluster name for Ollama models'
+    Value: !GetAtt ComputeStack.Outputs.ECSClusterName
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSClusterName'
+  
+  LoadBalancerDNS:
+    Description: 'Application Load Balancer DNS name'
+    Value: !GetAtt ComputeStack.Outputs.LoadBalancerDNS
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerDNS'
+
+  # Frontend Outputs
+  CloudFrontURL:
+    Description: 'CloudFront distribution URL for the management interface'
+    Value: !GetAtt FrontendStack.Outputs.CloudFrontURL
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontURL'
+  
+  S3BucketName:
+    Description: 'S3 bucket name for frontend hosting'
+    Value: !GetAtt FrontendStack.Outputs.S3BucketName
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketName'
+
+  # Database Outputs
+  ModelsTableName:
+    Description: 'DynamoDB table name for model definitions'
+    Value: !GetAtt StorageStack.Outputs.ModelsTableName
+    Export:
+      Name: !Sub '${AWS::StackName}-ModelsTableName'
+  
+  InstancesTableName:
+    Description: 'DynamoDB table name for running instances'
+    Value: !GetAtt StorageStack.Outputs.InstancesTableName
+    Export:
+      Name: !Sub '${AWS::StackName}-InstancesTableName'
+
+  # Initial Setup Instructions
+  SetupInstructions:
+    Description: 'Initial setup instructions'
+    Value: !Sub |
+      1. Access the management interface: ${FrontendStack.Outputs.CloudFrontURL}
+      2. Create initial admin user:
+         aws cognito-idp admin-create-user \
+           --user-pool-id ${AuthStack.Outputs.UserPoolId} \
+           --username admin \
+           --user-attributes Name=email,Value=${AdminEmail} \
+           --temporary-password TempPass123! \
+           --message-action SUPPRESS
+      3. Login with admin credentials and change password
+      4. Start deploying your first Ollama model!
+
+Tags:
+  - Key: Environment
+    Value: !Ref Environment
+  - Key: Project
+    Value: 'aws-ollama-platform'
+  - Key: Version
+    Value: '1.0.0'
