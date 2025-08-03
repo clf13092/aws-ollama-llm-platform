@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Docker イメージをビルドしてECRにプッシュするスクリプト
+# Universal Ollama Docker イメージをビルドしてECRにプッシュするスクリプト
 
 set -e
 
@@ -22,7 +22,7 @@ print_color() {
     esac
 }
 
-print_color "blue" "🚀 Starting Docker image build and push process"
+print_color "blue" "🚀 Starting Universal Ollama Docker image build and push process"
 print_color "blue" "AWS Account: $AWS_ACCOUNT_ID"
 print_color "blue" "Region: $AWS_REGION"
 print_color "blue" "Environment: $ENVIRONMENT"
@@ -31,104 +31,60 @@ print_color "blue" "Environment: $ENVIRONMENT"
 print_color "blue" "🔐 Logging in to ECR..."
 aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 
-# ベースイメージをビルド
-print_color "blue" "🏗️  Building base Ollama image..."
-BASE_REPO_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ENVIRONMENT-ollama-base"
+# ECRリポジトリURIを設定
+REPO_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ENVIRONMENT-ollama"
 
-cd docker/base
-docker build -t ollama-base:latest .
-docker tag ollama-base:latest $BASE_REPO_URI:latest
-docker tag ollama-base:latest $BASE_REPO_URI:$(date +%Y%m%d-%H%M%S)
+print_color "blue" "📦 Repository URI: $REPO_URI"
 
-print_color "blue" "📤 Pushing base image to ECR..."
-docker push $BASE_REPO_URI:latest
-docker push $BASE_REPO_URI:$(date +%Y%m%d-%H%M%S)
-print_color "green" "✅ Base image pushed successfully"
+# ユニバーサルOllamaイメージをビルド
+print_color "blue" "🏗️  Building universal Ollama image..."
 
-cd ../..
-
-# モデル固有のイメージをビルド
-declare -A MODELS=(
-    ["llama2-7b"]="llama2:7b"
-    ["llama2-13b"]="llama2:13b"
-    ["codellama-7b"]="codellama:7b"
-    ["codellama-13b"]="codellama:13b"
-    ["mistral-7b"]="mistral:7b"
-)
-
-for model_dir in "${!MODELS[@]}"; do
-    model_name="${MODELS[$model_dir]}"
-    repo_name="$ENVIRONMENT-ollama-$model_dir"
-    repo_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$repo_name"
+if [ -d "docker/base" ]; then
+    cd docker/base
     
-    print_color "blue" "🏗️  Building $model_name image..."
+    # イメージをビルド
+    docker build -t ollama-universal:latest .
     
-    # Dockerfileが存在するかチェック
-    if [ -f "docker/models/$model_dir/Dockerfile" ]; then
-        cd docker/models/$model_dir
-        
-        # ベースイメージURIを引数として渡してビルド
-        docker build \
-            --build-arg BASE_IMAGE_URI=$BASE_REPO_URI \
-            -t ollama-$model_dir:latest .
-        
-        docker tag ollama-$model_dir:latest $repo_uri:latest
-        docker tag ollama-$model_dir:latest $repo_uri:$(date +%Y%m%d-%H%M%S)
-        
-        print_color "blue" "📤 Pushing $model_name image to ECR..."
-        docker push $repo_uri:latest
-        docker push $repo_uri:$(date +%Y%m%d-%H%M%S)
-        print_color "green" "✅ $model_name image pushed successfully"
-        
-        cd ../../..
-    else
-        print_color "yellow" "⚠️  Dockerfile not found for $model_dir, creating generic one..."
-        
-        # 汎用的なDockerfileを作成
-        mkdir -p docker/models/$model_dir
-        cat > docker/models/$model_dir/Dockerfile << EOF
-ARG BASE_IMAGE_URI
-FROM \${BASE_IMAGE_URI}:latest
-
-LABEL model="$model_name"
-ENV MODEL_NAME=$model_name
-ENV PRELOAD_MODEL=true
-EOF
-        
-        cd docker/models/$model_dir
-        docker build \
-            --build-arg BASE_IMAGE_URI=$BASE_REPO_URI \
-            -t ollama-$model_dir:latest .
-        
-        docker tag ollama-$model_dir:latest $repo_uri:latest
-        docker tag ollama-$model_dir:latest $repo_uri:$(date +%Y%m%d-%H%M%S)
-        
-        docker push $repo_uri:latest
-        docker push $repo_uri:$(date +%Y%m%d-%H%M%S)
-        print_color "green" "✅ $model_name image pushed successfully"
-        
-        cd ../../..
-    fi
-done
+    # タグ付け
+    docker tag ollama-universal:latest $REPO_URI:latest
+    docker tag ollama-universal:latest $REPO_URI:$(date +%Y%m%d-%H%M%S)
+    docker tag ollama-universal:latest $REPO_URI:v2.0  # 動的モデル対応版
+    
+    print_color "blue" "📤 Pushing universal Ollama image to ECR..."
+    docker push $REPO_URI:latest
+    docker push $REPO_URI:$(date +%Y%m%d-%H%M%S)
+    docker push $REPO_URI:v2.0
+    
+    print_color "green" "✅ Universal Ollama image pushed successfully"
+    cd ../..
+else
+    print_color "red" "❌ Docker base directory not found. Please ensure docker/base exists."
+    exit 1
+fi
 
 # イメージサイズの確認
-print_color "blue" "📊 Image sizes:"
-docker images | grep ollama | awk '{print $1 ":" $2 " - " $7 $8}'
+print_color "blue" "📊 Image size:"
+docker images | grep ollama-universal | awk '{print $1 ":" $2 " - " $7 $8}'
 
 # クリーンアップ（オプション）
 read -p "🗑️  Do you want to clean up local Docker images? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     print_color "blue" "🧹 Cleaning up local images..."
-    docker images | grep ollama | awk '{print $3}' | xargs docker rmi -f || true
+    docker images | grep ollama-universal | awk '{print $3}' | xargs docker rmi -f || true
     print_color "green" "✅ Local images cleaned up"
 fi
 
-print_color "green" "🎉 All images built and pushed successfully!"
-print_color "blue" "📋 ECR Repository URIs:"
-echo "Base: $BASE_REPO_URI"
-for model_dir in "${!MODELS[@]}"; do
-    repo_name="$ENVIRONMENT-ollama-$model_dir"
-    repo_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$repo_name"
-    echo "$model_dir: $repo_uri"
-done
+print_color "green" "🎉 Universal Ollama image built and pushed successfully!"
+print_color "blue" "📋 ECR Repository URI: $REPO_URI"
+print_color "blue" "🔧 Available tags: latest, v2.0, $(date +%Y%m%d-%H%M%S)"
+
+print_color "yellow" "💡 This universal image supports dynamic model loading:"
+print_color "yellow" "   - Llama2 (7B, 13B, 70B)"
+print_color "yellow" "   - CodeLlama (7B, 13B, 34B)"
+print_color "yellow" "   - Mistral (7B, 7B-Instruct)"
+print_color "yellow" "   - Phi (2.7B)"
+print_color "yellow" "   - Gemma (2B, 7B)"
+print_color "yellow" "   - Qwen (4B, 7B, 14B)"
+print_color "yellow" "   - DeepSeek-Coder (6.7B, 33B)"
+print_color "yellow" "   - And more models supported by Ollama!"

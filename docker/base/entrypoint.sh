@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting AWS Ollama Platform Container"
+echo "🚀 Starting AWS Ollama Platform Container (Dynamic Model Support)"
 echo "Instance ID: ${INSTANCE_ID:-unknown}"
 echo "User ID: ${USER_ID:-unknown}"
 echo "Model Name: ${MODEL_NAME:-none}"
@@ -29,38 +29,24 @@ if ! curl -f http://localhost:11434/api/tags >/dev/null 2>&1; then
     exit 1
 fi
 
-# モデルのプリロード
-if [ "$PRELOAD_MODEL" = "true" ] && [ -n "$MODEL_NAME" ]; then
-    echo "📦 Preloading model: $MODEL_NAME"
+# 動的モデル管理
+if [ -n "$MODEL_NAME" ] && [ "$MODEL_NAME" != "none" ]; then
+    echo "🤖 Managing model: $MODEL_NAME"
     
-    # モデルをダウンロード
-    echo "   Downloading model..."
-    if ollama pull "$MODEL_NAME"; then
-        echo "✅ Model downloaded successfully"
-        
-        # モデルをメモリにロード（小さなプロンプトで実行）
-        echo "   Loading model into memory..."
-        if curl -X POST http://localhost:11434/api/generate \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"$MODEL_NAME\",\"prompt\":\"Hello\",\"stream\":false}" \
-            >/dev/null 2>&1; then
-            echo "✅ Model loaded into memory"
-        else
-            echo "⚠️  Warning: Failed to load model into memory, but continuing..."
-        fi
+    # モデル管理スクリプトを実行
+    if /app/model-manager.sh "$MODEL_NAME" "$PRELOAD_MODEL"; then
+        echo "✅ Model management completed successfully"
     else
-        echo "❌ Failed to download model: $MODEL_NAME"
-        echo "   Available models:"
-        ollama list || echo "   No models available"
-        # モデルダウンロードに失敗してもサーバーは継続
+        echo "❌ Model management failed"
+        echo "⚠️  Container will continue running, but model may not be available"
     fi
 else
-    echo "ℹ️  No model preloading requested"
+    echo "ℹ️  No specific model requested, Ollama server ready for dynamic model loading"
 fi
 
 # 利用可能なモデルを表示
 echo "📋 Available models:"
-ollama list || echo "   No models available"
+ollama list || echo "   No models available yet"
 
 # システム情報を表示
 echo "💻 System Information:"
@@ -77,6 +63,15 @@ fi
 
 echo "🎉 Container initialization completed!"
 echo "🌐 Ollama API is available at http://0.0.0.0:11434"
+
+# 動的モデル情報の表示
+if [ -n "$MODEL_NAME" ] && [ "$MODEL_NAME" != "none" ]; then
+    echo "🔗 Model-specific endpoint ready for: $MODEL_NAME"
+    echo "📝 Example API call:"
+    echo "   curl -X POST http://localhost:11434/api/generate \\"
+    echo "        -H 'Content-Type: application/json' \\"
+    echo "        -d '{\"model\":\"$MODEL_NAME\",\"prompt\":\"Hello\",\"stream\":false}'"
+fi
 
 # シグナルハンドリング
 cleanup() {

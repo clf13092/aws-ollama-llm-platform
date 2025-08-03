@@ -15,7 +15,7 @@ ecs_client = boto3.client('ecs')
 def lambda_handler(event, context):
     """
     Instances API Lambda Handler
-    Handles CRUD operations for Ollama model instances
+    Handles CRUD operations for Ollama model instances with dynamic model support
     """
     try:
         http_method = event['httpMethod']
@@ -59,7 +59,7 @@ def get_user_info_from_context(event):
     }
 
 def create_instance(event, user_info):
-    """Create a new Ollama model instance"""
+    """Create a new Ollama model instance with dynamic model support"""
     try:
         body = json.loads(event['body'])
         model_id = body.get('modelId')
@@ -88,7 +88,7 @@ def create_instance(event, user_info):
         # Generate unique instance ID
         instance_id = str(uuid.uuid4())
         
-        # Start ECS task with appropriate configuration
+        # Start ECS task with dynamic model configuration
         task_arn = start_ecs_task(instance_id, model_id, model_info, instance_type, user_info)
         
         # Save instance information to DynamoDB
@@ -110,7 +110,7 @@ def create_instance(event, user_info):
         
         instances_table.put_item(Item=instance_data)
         
-        logger.info(f"Created instance {instance_id} for user {user_info['user_id']}")
+        logger.info(f"Created instance {instance_id} for user {user_info['user_id']} with model {model_id}")
         
         return {
             'statusCode': 201,
@@ -136,12 +136,12 @@ def create_instance(event, user_info):
         }
 
 def start_ecs_task(instance_id, model_id, model_info, instance_type, user_info):
-    """Start ECS task with model-specific configuration"""
+    """Start ECS task with dynamic model configuration"""
     
-    # Get task definition and container image based on model and instance type
-    task_config = get_task_configuration(model_id, instance_type)
+    # Get task definition based on instance type (no longer model-specific)
+    task_config = get_task_configuration(instance_type)
     
-    # Container environment variables
+    # Container environment variables for dynamic model loading
     container_overrides = {
         'name': 'ollama',
         'environment': [
@@ -150,13 +150,14 @@ def start_ecs_task(instance_id, model_id, model_info, instance_type, user_info):
             {'name': 'MODEL_NAME', 'value': model_info.get('ollama_model_name', model_id)},
             {'name': 'INSTANCE_ID', 'value': instance_id},
             {'name': 'USER_ID', 'value': user_info['user_id']},
-            {'name': 'PRELOAD_MODEL', 'value': 'true'}
+            {'name': 'PRELOAD_MODEL', 'value': 'true'}  # Always preload for better UX
         ]
     }
     
-    # Add container image override if using pre-built model image
-    if task_config.get('container_image'):
-        container_overrides['image'] = task_config['container_image']
+    # Use the universal Ollama image (no model-specific images needed)
+    base_image_uri = os.environ.get('OLLAMA_BASE_IMAGE_URI')
+    if base_image_uri:
+        container_overrides['image'] = base_image_uri
     
     # ECS task configuration
     run_task_params = {
@@ -196,30 +197,21 @@ def start_ecs_task(instance_id, model_id, model_info, instance_type, user_info):
         raise Exception("Failed to start ECS task")
     
     task_arn = response['tasks'][0]['taskArn']
-    logger.info(f"Started ECS task {task_arn} for instance {instance_id}")
+    logger.info(f"Started ECS task {task_arn} for instance {instance_id} with model {model_id}")
     
     return task_arn
 
-def get_task_configuration(model_id, instance_type):
+def get_task_configuration(instance_type):
     """
-    Get appropriate task definition and configuration based on model and instance type
+    Get appropriate task definition based on instance type only
+    No longer model-specific since we use dynamic model loading
     """
-    
-    # Model-specific ECR image mapping
-    model_images = {
-        'llama2:7b': os.environ.get('LLAMA2_7B_IMAGE_URI'),
-        'llama2:13b': os.environ.get('LLAMA2_13B_IMAGE_URI'),
-        'codellama:7b': os.environ.get('CODELLAMA_7B_IMAGE_URI'),
-        'codellama:13b': os.environ.get('CODELLAMA_13B_IMAGE_URI'),
-        'mistral:7b': os.environ.get('MISTRAL_7B_IMAGE_URI')
-    }
     
     # Instance type categorization
     gpu_instance_types = ['ml.g4dn.xlarge', 'ml.g4dn.2xlarge', 'ml.p3.2xlarge']
     large_cpu_types = ['ml.m5.2xlarge', 'ml.m5.4xlarge', 'ml.c5.4xlarge']
     
     config = {
-        'container_image': model_images.get(model_id),
         'launch_type': 'FARGATE',  # Default to Fargate
         'task_definition': os.environ['CPU_TASK_DEFINITION_ARN']
     }
@@ -250,6 +242,216 @@ def get_task_configuration(model_id, instance_type):
         })
     
     return config
+
+def delete_instance(instance_id, user_info):
+    """Delete an instance and stop its ECS task"""
+    try:
+        instances_table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
+        
+        # Get instance information
+        response = instances_table.get_item(Key={'id': instance_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers(),
+                'body': json.dumps({'error': 'Instance not found'})
+            }
+        
+        instance = response['Item']
+        
+        # Permission check (admin or owner only)
+        if instance['user_id'] != user_info['user_id'] and 'Administrators' not in user_info['groups']:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers(),
+                'body': json.dumps({'error': 'Access denied'})
+            }
+        
+        # Stop ECS task
+        if instance.get('task_arn'):
+            try:
+                ecs_client.stop_task(
+                    cluster=os.environ['ECS_CLUSTER_NAME'],
+                    task=instance['task_arn'],
+                    reason=f'User requested deletion of instance {instance_id}'
+                )
+                logger.info(f"Stopped ECS task {instance['task_arn']}")
+            except Exception as e:
+                logger.warning(f"Failed to stop ECS task: {str(e)}")
+        
+        # Delete instance from DynamoDB
+        instances_table.delete_item(Key={'id': instance_id})
+        
+        logger.info(f"Deleted instance {instance_id}")
+        
+        return {
+            'statusCode': 204,
+            'headers': cors_headers()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error deleting instance: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers(),
+            'body': json.dumps({'error': 'Failed to delete instance', 'message': str(e)})
+        }
+
+def list_instances(user_info):
+    """List user's instances"""
+    try:
+        instances_table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
+        
+        if 'Administrators' in user_info['groups']:
+            # Admin can see all instances
+            response = instances_table.scan()
+        else:
+            # Regular users can only see their own instances
+            response = instances_table.scan(
+                FilterExpression=boto3.dynamodb.conditions.Attr('user_id').eq(user_info['user_id'])
+            )
+        
+        instances = []
+        for item in response['Items']:
+            instances.append({
+                'id': item['id'],
+                'modelId': item['model_id'],
+                'modelName': item['model_name'],
+                'status': item['status'],
+                'instanceType': item['instance_type'],
+                'estimatedCost': item['estimated_cost'],
+                'endpoint': item['endpoint'],
+                'startedAt': item['created_at']
+            })
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers(),
+            'body': json.dumps(instances)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing instances: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers(),
+            'body': json.dumps({'error': 'Failed to list instances', 'message': str(e)})
+        }
+
+def get_instance(instance_id, user_info):
+    """Get specific instance details"""
+    try:
+        instances_table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
+        
+        response = instances_table.get_item(Key={'id': instance_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers(),
+                'body': json.dumps({'error': 'Instance not found'})
+            }
+        
+        instance = response['Item']
+        
+        # Permission check
+        if instance['user_id'] != user_info['user_id'] and 'Administrators' not in user_info['groups']:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers(),
+                'body': json.dumps({'error': 'Access denied'})
+            }
+        
+        # Update status from ECS if needed
+        if instance.get('task_arn'):
+            current_status = get_ecs_task_status(instance['task_arn'])
+            if current_status != instance['status']:
+                # Update status in DynamoDB
+                instances_table.update_item(
+                    Key={'id': instance_id},
+                    UpdateExpression='SET #status = :status, updated_at = :updated_at',
+                    ExpressionAttributeNames={'#status': 'status'},
+                    ExpressionAttributeValues={
+                        ':status': current_status,
+                        ':updated_at': datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                instance['status'] = current_status
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers(),
+            'body': json.dumps({
+                'id': instance['id'],
+                'modelId': instance['model_id'],
+                'modelName': instance['model_name'],
+                'status': instance['status'],
+                'instanceType': instance['instance_type'],
+                'estimatedCost': instance['estimated_cost'],
+                'endpoint': instance['endpoint'],
+                'startedAt': instance['created_at'],
+                'updatedAt': instance.get('updated_at', instance['created_at'])
+            })
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting instance: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers(),
+            'body': json.dumps({'error': 'Failed to get instance', 'message': str(e)})
+        }
+
+def get_ecs_task_status(task_arn):
+    """Get current ECS task status"""
+    try:
+        response = ecs_client.describe_tasks(
+            cluster=os.environ['ECS_CLUSTER_NAME'],
+            tasks=[task_arn]
+        )
+        
+        if not response['tasks']:
+            return 'stopped'
+        
+        task = response['tasks'][0]
+        last_status = task.get('lastStatus', '').lower()
+        
+        # Map ECS status to application status
+        status_mapping = {
+            'pending': 'starting',
+            'running': 'running',
+            'stopping': 'stopping',
+            'stopped': 'stopped'
+        }
+        
+        return status_mapping.get(last_status, 'unknown')
+        
+    except Exception as e:
+        logger.warning(f"Failed to get ECS task status: {str(e)}")
+        return 'unknown'
+
+def get_estimated_cost(instance_type):
+    """Calculate estimated cost based on instance type"""
+    cost_mapping = {
+        'ml.m5.large': '$0.12/hour',
+        'ml.m5.xlarge': '$0.24/hour',
+        'ml.m5.2xlarge': '$0.48/hour',
+        'ml.g4dn.xlarge': '$0.71/hour',
+        'ml.g4dn.2xlarge': '$1.42/hour',
+        'ml.p3.2xlarge': '$3.06/hour'
+    }
+    
+    return cost_mapping.get(instance_type, '$0.00/hour')
+
+def cors_headers():
+    """Return CORS headers"""
+    return {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
+    }
 
 def delete_instance(instance_id, user_info):
     """Delete an instance and stop its ECS task"""

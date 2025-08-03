@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'ECR repositories for AWS Ollama Platform - Container image storage'
+Description: 'ECR repository for AWS Ollama Platform - Universal Ollama container image storage'
 
 Parameters:
   Environment:
@@ -11,11 +11,11 @@ Conditions:
   IsProduction: !Equals [!Ref Environment, 'production']
 
 Resources:
-  # Base Ollama ECR Repository
-  OllamaBaseRepository:
+  # Universal Ollama ECR Repository
+  OllamaRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${Environment}-ollama-base'
+      RepositoryName: !Sub '${Environment}-ollama'
       ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -71,221 +71,36 @@ Resources:
           Value: 'aws-ollama-platform'
         - Key: Component
           Value: 'container-registry'
-
-  # Llama2 7B Pre-built Repository
-  OllamaLlama2_7bRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${Environment}-ollama-llama2-7b'
-      ImageTagMutability: MUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-        - Key: Model
-          Value: 'llama2-7b'
-
-  # Llama2 13B Pre-built Repository
-  OllamaLlama2_13bRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${Environment}-ollama-llama2-13b'
-      ImageTagMutability: MUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-        - Key: Model
-          Value: 'llama2-13b'
-
-  # CodeLlama 7B Pre-built Repository
-  OllamaCodeLlama7bRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${Environment}-ollama-codellama-7b'
-      ImageTagMutability: MUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-        - Key: Model
-          Value: 'codellama-7b'
-
-  # CodeLlama 13B Pre-built Repository
-  OllamaCodeLlama13bRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${Environment}-ollama-codellama-13b'
-      ImageTagMutability: MUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-        - Key: Model
-          Value: 'codellama-13b'
-
-  # Mistral 7B Pre-built Repository
-  OllamaMistral7bRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${Environment}-ollama-mistral-7b'
-      ImageTagMutability: MUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-        - Key: Model
-          Value: 'mistral-7b'
+        - Key: ImageType
+          Value: 'universal-ollama'
 
 Outputs:
-  OllamaBaseRepositoryUri:
-    Description: 'Base Ollama ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaBaseRepository}'
+  OllamaRepositoryUri:
+    Description: 'Universal Ollama ECR Repository URI'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaRepository}'
     Export:
-      Name: !Sub '${AWS::StackName}-OllamaBaseRepositoryUri'
+      Name: !Sub '${AWS::StackName}-OllamaRepositoryUri'
 
-  OllamaLlama2_7bRepositoryUri:
-    Description: 'Llama2 7B ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaLlama2_7bRepository}'
+  OllamaRepositoryName:
+    Description: 'Universal Ollama ECR Repository Name'
+    Value: !Ref OllamaRepository
     Export:
-      Name: !Sub '${AWS::StackName}-OllamaLlama2-7bRepositoryUri'
+      Name: !Sub '${AWS::StackName}-OllamaRepositoryName'
 
-  OllamaLlama2_13bRepositoryUri:
-    Description: 'Llama2 13B ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaLlama2_13bRepository}'
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaLlama2-13bRepositoryUri'
-
-  OllamaCodeLlama7bRepositoryUri:
-    Description: 'CodeLlama 7B ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaCodeLlama7bRepository}'
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaCodeLlama7bRepositoryUri'
-
-  OllamaCodeLlama13bRepositoryUri:
-    Description: 'CodeLlama 13B ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaCodeLlama13bRepository}'
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaCodeLlama13bRepositoryUri'
-
-  OllamaMistral7bRepositoryUri:
-    Description: 'Mistral 7B ECR Repository URI'
-    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaMistral7bRepository}'
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaMistral7bRepositoryUri'
-
-  # Repository Names for easy reference
-  RepositoryNames:
-    Description: 'All ECR Repository Names'
+  RepositoryInfo:
+    Description: 'Repository Information'
     Value: !Sub |
-      Base: ${OllamaBaseRepository}
-      Llama2-7B: ${OllamaLlama2_7bRepository}
-      Llama2-13B: ${OllamaLlama2_13bRepository}
-      CodeLlama-7B: ${OllamaCodeLlama7bRepository}
-      CodeLlama-13B: ${OllamaCodeLlama13bRepository}
-      Mistral-7B: ${OllamaMistral7bRepository}
+      Universal Ollama Repository: ${OllamaRepository}
+      URI: ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${OllamaRepository}
+      
+      This single repository contains the universal Ollama image that can
+      dynamically load any supported model at runtime through environment variables.
+      
+      Supported Models:
+      - Llama2 (7B, 13B, 70B)
+      - CodeLlama (7B, 13B, 34B)
+      - Mistral (7B, 7B-Instruct)
+      - Phi (2.7B)
+      - Gemma (2B, 7B)
+      - Qwen (4B, 7B, 14B)
+      - DeepSeek-Coder (6.7B, 33B)
