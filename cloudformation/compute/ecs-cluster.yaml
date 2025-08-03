@@ -38,7 +38,6 @@ Resources:
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
-        - EC2
       DefaultCapacityProviderStrategy:
         - CapacityProvider: FARGATE
           Weight: 1
@@ -61,9 +60,9 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-ollama-alb'
       Type: application
-      Scheme: internet-facing
+      Scheme: internal
       IpAddressType: ipv4
-      Subnets: !Ref PublicSubnetIds
+      Subnets: !Ref PrivateSubnetIds
       SecurityGroups:
         - !Ref ALBSecurityGroup
       LoadBalancerAttributes:
@@ -72,9 +71,9 @@ Resources:
         - Key: routing.http2.enabled
           Value: 'true'
         - Key: access_logs.s3.enabled
-          Value: !If [IsProduction, 'true', 'false']
+          Value: 'false'
         - Key: deletion_protection.enabled
-          Value: !If [IsProduction, 'true', 'false']
+          Value: 'false'
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -85,7 +84,6 @@ Resources:
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub '${Environment}-ollama-alb-sg'
       GroupDescription: 'Security group for Application Load Balancer'
       VpcId: !Ref VPCId
       SecurityGroupIngress:
@@ -103,8 +101,8 @@ Resources:
         - IpProtocol: tcp
           FromPort: 11434
           ToPort: 11434
-          DestinationSecurityGroupId: !Ref ECSSecurityGroup
-          Description: 'Ollama API traffic to ECS'
+          CidrIp: '10.0.0.0/16'
+          Description: 'Ollama API traffic to ECS (VPC internal)'
       Tags:
         - Key: Name
           Value: !Sub '${Environment}-ollama-alb-sg'
@@ -115,7 +113,6 @@ Resources:
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub '${Environment}-ollama-ecs-sg'
       GroupDescription: 'Security group for ECS tasks running Ollama'
       VpcId: !Ref VPCId
       SecurityGroupIngress:
@@ -151,7 +148,6 @@ Resources:
       VpcId: !Ref VPCId
       TargetType: ip
       HealthCheckEnabled: true
-      HealthCheckGracePeriodSeconds: 300
       HealthCheckIntervalSeconds: 30
       HealthCheckPath: '/api/tags'
       HealthCheckPort: traffic-port
@@ -289,8 +285,7 @@ Resources:
               Value: '0.0.0.0'
             - Name: OLLAMA_ORIGINS
               Value: '*'
-            - Name: NVIDIA_VISIBLE_DEVICES
-              Value: 'all'
+            # NVIDIA_VISIBLE_DEVICES環境変数を削除（ECSが自動的に設定するため）
           ResourceRequirements:
             - Type: GPU
               Value: '1'
@@ -316,83 +311,82 @@ Resources:
         - Key: Project
           Value: 'aws-ollama-platform'
 
-  # EC2 Launch Template for GPU instances
-  EC2LaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateName: !Sub '${Environment}-ollama-gpu-template'
-      LaunchTemplateData:
-        ImageId: ami-0c02fb55956c7d316  # ECS-optimized Amazon Linux 2 with GPU support
-        InstanceType: g4dn.xlarge
-        IamInstanceProfile:
-          Arn: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${Environment}-ollama-ec2-instance-profile'
-        SecurityGroupIds:
-          - !Ref ECSSecurityGroup
-        UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash
-            echo "ECS_CLUSTER=${ECSCluster}" >> /etc/ecs/ecs.config
-            echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
-            yum update -y
-            yum install -y ecs-init
-            service docker start
-            start ecs
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: Name
-                Value: !Sub '${Environment}-ollama-gpu-instance'
-              - Key: Environment
-                Value: !Ref Environment
-              - Key: Project
-                Value: 'aws-ollama-platform'
+  # EC2 Launch Template for GPU instances (commented out to avoid circular dependency)
+  # EC2LaunchTemplate:
+  #   Type: AWS::EC2::LaunchTemplate
+  #   Properties:
+  #     LaunchTemplateName: !Sub '${Environment}-ollama-gpu-template'
+  #     LaunchTemplateData:
+  #       ImageId: ami-0c02fb55956c7d316  # ECS-optimized Amazon Linux 2 with GPU support
+  #       InstanceType: g4dn.xlarge
+  #       IamInstanceProfile:
+  #         Arn: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${Environment}-ollama-ec2-instance-profile'
+  #       UserData:
+  #         Fn::Base64: !Sub |
+  #           #!/bin/bash
+  #           echo "ECS_CLUSTER=${ECSCluster}" >> /etc/ecs/ecs.config
+  #           echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
+  #           yum update -y
+  #           yum install -y ecs-init
+  #           service docker start
+  #           start ecs
+  #       TagSpecifications:
+  #         - ResourceType: instance
+  #           Tags:
+  #             - Key: Name
+  #               Value: !Sub '${Environment}-ollama-gpu-instance'
+  #             - Key: Environment
+  #               Value: !Ref Environment
+  #             - Key: Project
+  #               Value: 'aws-ollama-platform'
 
-  # Auto Scaling Group for EC2 instances (when needed)
-  AutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      AutoScalingGroupName: !Sub '${Environment}-ollama-asg'
-      VPCZoneIdentifier: !Ref PrivateSubnetIds
-      LaunchTemplate:
-        LaunchTemplateId: !Ref EC2LaunchTemplate
-        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 0
-      MaxSize: !If [IsProduction, 10, 3]
-      DesiredCapacity: 0
-      TargetGroupARNs:
-        - !Ref DefaultTargetGroup
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
-      DefaultCooldown: 300
-      Tags:
-        - Key: Name
-          Value: !Sub '${Environment}-ollama-gpu-instance'
-          PropagateAtLaunch: true
-        - Key: Environment
-          Value: !Ref Environment
-          PropagateAtLaunch: true
-        - Key: Project
-          Value: 'aws-ollama-platform'
-          PropagateAtLaunch: true
+  # Auto Scaling Group for EC2 instances (commented out to avoid circular dependency)
+  # AutoScalingGroup:
+  #   Type: AWS::AutoScaling::AutoScalingGroup
+  #   Properties:
+  #     AutoScalingGroupName: !Sub '${Environment}-ollama-asg'
+  #     VPCZoneIdentifier: !Ref PrivateSubnetIds
+  #     LaunchTemplate:
+  #       LaunchTemplateId: !Ref EC2LaunchTemplate
+  #       Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+  #     MinSize: 0
+  #     MaxSize: !If [IsProduction, 10, 3]
+  #     DesiredCapacity: 0
+  #     TargetGroupARNs:
+  #       - !Ref DefaultTargetGroup
+  #     HealthCheckType: ELB
+  #     HealthCheckGracePeriod: 300
+  #     DefaultCooldown: 300
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub '${Environment}-ollama-gpu-instance'
+  #         PropagateAtLaunch: true
+  #       - Key: Environment
+  #         Value: !Ref Environment
+  #         PropagateAtLaunch: true
+  #       - Key: Project
+  #         Value: 'aws-ollama-platform'
+  #         PropagateAtLaunch: true
 
-  # Capacity Provider for EC2
-  EC2CapacityProvider:
-    Type: AWS::ECS::CapacityProvider
-    Properties:
-      Name: !Sub '${Environment}-ollama-ec2-capacity-provider'
-      AutoScalingGroupProvider:
-        AutoScalingGroupArn: !Ref AutoScalingGroup
-        ManagedScaling:
-          Status: ENABLED
-          TargetCapacity: 80
-          MinimumScalingStepSize: 1
-          MaximumScalingStepSize: 10
-        ManagedTerminationProtection: DISABLED
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
+  # Capacity Provider for EC2 (commented out to avoid circular dependency)
+  # Will be added via separate stack or manual configuration
+  # EC2CapacityProvider:
+  #   Type: AWS::ECS::CapacityProvider
+  #   Properties:
+  #     Name: !Sub '${Environment}-ollama-ec2-capacity-provider'
+  #     AutoScalingGroupProvider:
+  #       AutoScalingGroupArn: !Ref AutoScalingGroup
+  #       ManagedScaling:
+  #         Status: ENABLED
+  #         TargetCapacity: 80
+  #         MinimumScalingStepSize: 1
+  #         MaximumScalingStepSize: 10
+  #       ManagedTerminationProtection: DISABLED
+  #     Tags:
+  #       - Key: Environment
+  #         Value: !Ref Environment
+  #       - Key: Project
+  #         Value: 'aws-ollama-platform'
 
   # CloudWatch Alarms for monitoring
   HighCPUAlarm:
@@ -441,30 +435,30 @@ Resources:
       TopicName: !Sub '${Environment}-ollama-ecs-alerts'
       DisplayName: 'AWS Ollama Platform - ECS Alerts'
 
-  # Application Auto Scaling Target for ECS Service
-  ECSScalableTarget:
-    Type: AWS::ApplicationAutoScaling::ScalableTarget
-    Properties:
-      MaxCapacity: !If [IsProduction, 20, 5]
-      MinCapacity: 0
-      ResourceId: !Sub 'service/${ECSCluster}/placeholder'
-      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
-      ScalableDimension: ecs:service:DesiredCount
-      ServiceNamespace: ecs
+  # Application Auto Scaling Target for ECS Service - 無効化
+  # ECSScalableTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   Properties:
+  #     MaxCapacity: !If [IsProduction, 20, 5]
+  #     MinCapacity: 0
+  #     ResourceId: !Sub 'service/${ECSCluster}/placeholder'
+  #     RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+  #     ScalableDimension: ecs:service:DesiredCount
+  #     ServiceNamespace: ecs
 
-  # Scaling Policy for Scale Up
-  ECSScaleUpPolicy:
-    Type: AWS::ApplicationAutoScaling::ScalingPolicy
-    Properties:
-      PolicyName: !Sub '${Environment}-ollama-scale-up'
-      PolicyType: TargetTrackingScaling
-      ScalingTargetId: !Ref ECSScalableTarget
-      TargetTrackingScalingPolicyConfiguration:
-        TargetValue: 70.0
-        PredefinedMetricSpecification:
-          PredefinedMetricType: ECSServiceAverageCPUUtilization
-        ScaleOutCooldown: 300
-        ScaleInCooldown: 300
+  # Scaling Policy for Scale Up - 無効化
+  # ECSScaleUpPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: !Sub '${Environment}-ollama-scale-up'
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref ECSScalableTarget
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       TargetValue: 70.0
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
+  #       ScaleOutCooldown: 300
+  #       ScaleInCooldown: 300
 
 Outputs:
   ECSClusterName:

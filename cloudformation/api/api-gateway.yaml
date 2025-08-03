@@ -41,6 +41,10 @@ Parameters:
   ECSTaskRole:
     Type: String
     Description: 'IAM Role ARN for ECS tasks'
+    
+  APIGatewayCloudWatchRoleArn:
+    Type: String
+    Description: 'IAM Role ARN for API Gateway CloudWatch Logs'
 
 Resources:
   # API Gateway REST API
@@ -819,12 +823,18 @@ Resources:
       - InstancesLogsGetMethod
     Properties:
       RestApiId: !Ref OllamaAPI
-      StageName: !Ref Environment
-      StageDescription: !Sub 'Deployment for ${Environment} environment'
+      Description: !Sub 'Deployment for ${Environment} environment'
+
+  # API Gateway Account Settings for CloudWatch Logs
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !Ref APIGatewayCloudWatchRoleArn
 
   # API Gateway Stage
   APIStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref OllamaAPI
       DeploymentId: !Ref APIDeployment

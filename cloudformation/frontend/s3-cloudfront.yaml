@@ -67,10 +67,13 @@ Resources:
     Properties:
       BucketName: !Sub '${Environment}-ollama-access-logs-${AWS::AccountId}'
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
+        BlockPublicAcls: false
         BlockPublicPolicy: true
-        IgnorePublicAcls: true
+        IgnorePublicAcls: false
         RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -109,19 +112,21 @@ Resources:
         HttpVersion: http2
         IPV6Enabled: true
         
-        # Custom domain configuration
-        Aliases: !If 
-          - HasCustomDomain
-          - [!Ref DomainName]
-          - !Ref AWS::NoValue
+        # Custom domain configuration - 無効化
+        # Aliases: !If 
+        #   - HasCustomDomain
+        #   - [!Ref DomainName]
+        #   - !Ref AWS::NoValue
         
-        # SSL Certificate
-        ViewerCertificate: !If
-          - HasCertificate
-          - AcmCertificateArn: !Ref CertificateArn
-            SslSupportMethod: sni-only
-            MinimumProtocolVersion: TLSv1.2_2021
-          - CloudFrontDefaultCertificate: true
+        # SSL Certificate - 無効化
+        # ViewerCertificate: !If
+        #   - HasCertificate
+        #   - AcmCertificateArn: !Ref CertificateArn
+        #     SslSupportMethod: sni-only
+        #     MinimumProtocolVersion: TLSv1.2_2021
+        #   - CloudFrontDefaultCertificate: true
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
         
         # Origins
         Origins:
@@ -184,13 +189,13 @@ Resources:
             ResponsePagePath: '/index.html'
             ErrorCachingMinTTL: 0
         
-        # Logging
-        Logging: !If
-          - IsProduction
-          - Bucket: !GetAtt LoggingBucket.DomainName
-            Prefix: 'cloudfront-logs/'
-            IncludeCookies: false
-          - !Ref AWS::NoValue
+        # Logging - 無効化
+        # Logging: !If
+        #   - IsProduction
+        #   - Bucket: !GetAtt LoggingBucket.DomainName
+        #     Prefix: 'cloudfront-logs/'
+        #     IncludeCookies: false
+        #   - !Ref AWS::NoValue
         
         # Geographic restrictions
         Restrictions:
@@ -216,229 +221,12 @@ Resources:
             Principal:
               Service: cloudfront.amazonaws.com
             Action: s3:GetObject
-            Resource: !Sub '${FrontendBucket}/*'
+            Resource: !Sub 'arn:aws:s3:::${FrontendBucket}/*'
             Condition:
               StringEquals:
                 'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
 
-  # Lambda function for deploying initial frontend content
-  DeployFrontendFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub '${Environment}-ollama-deploy-frontend'
-      Runtime: python3.9
-      Handler: index.lambda_handler
-      Role: !GetAtt DeployFrontendRole.Arn
-      Timeout: 300
-      MemorySize: 256
-      Environment:
-        Variables:
-          BUCKET_NAME: !Ref FrontendBucket
-          USER_POOL_ID: !Ref UserPoolId
-          USER_POOL_CLIENT_ID: !Ref UserPoolClientId
-          API_GATEWAY_URL: !Ref APIGatewayURL
-          CLOUDFRONT_DOMAIN: !GetAtt CloudFrontDistribution.DomainName
-          ENVIRONMENT: !Ref Environment
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          import cfnresponse
-          from datetime import datetime
-          
-          s3_client = boto3.client('s3')
-          
-          def lambda_handler(event, context):
-              try:
-                  if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
-                      deploy_frontend_files()
-                  
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
-          
-          def deploy_frontend_files():
-              bucket_name = os.environ['BUCKET_NAME']
-              
-              # Configuration file content
-              config_js = f"""
-              window.AWS_OLLAMA_CONFIG = {{
-                  userPoolId: '{os.environ['USER_POOL_ID']}',
-                  userPoolClientId: '{os.environ['USER_POOL_CLIENT_ID']}',
-                  apiGatewayUrl: '{os.environ['API_GATEWAY_URL']}',
-                  cloudfrontDomain: '{os.environ['CLOUDFRONT_DOMAIN']}',
-                  environment: '{os.environ['ENVIRONMENT']}',
-                  region: '{os.environ['AWS_REGION']}'
-              }};
-              """
-              
-              # Basic HTML file
-              index_html = f"""
-              <!DOCTYPE html>
-              <html lang="en">
-              <head>
-                  <meta charset="UTF-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                  <title>AWS Ollama Platform</title>
-                  <style>
-                      body {{
-                          font-family: Arial, sans-serif;
-                          margin: 0;
-                          padding: 20px;
-                          background-color: #f5f5f5;
-                      }}
-                      .container {{
-                          max-width: 800px;
-                          margin: 0 auto;
-                          background: white;
-                          padding: 20px;
-                          border-radius: 8px;
-                          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                      }}
-                      .header {{
-                          text-align: center;
-                          margin-bottom: 30px;
-                      }}
-                      .status {{
-                          padding: 10px;
-                          margin: 10px 0;
-                          border-radius: 4px;
-                          background-color: #d4edda;
-                          border: 1px solid #c3e6cb;
-                          color: #155724;
-                      }}
-                      .config {{
-                          background-color: #f8f9fa;
-                          padding: 15px;
-                          border-radius: 4px;
-                          margin: 20px 0;
-                      }}
-                      .code {{
-                          background-color: #272822;
-                          color: #f8f8f2;
-                          padding: 15px;
-                          border-radius: 4px;
-                          overflow-x: auto;
-                          font-family: 'Courier New', monospace;
-                      }}
-                  </style>
-              </head>
-              <body>
-                  <div class="container">
-                      <div class="header">
-                          <h1>🚀 AWS Ollama Platform</h1>
-                          <p>Dynamic LLM deployment on AWS with secure authentication</p>
-                      </div>
-                      
-                      <div class="status">
-                          ✅ Infrastructure deployed successfully!<br>
-                          📅 Deployed on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
-                      </div>
-                      
-                      <h2>🔧 System Configuration</h2>
-                      <div class="config">
-                          <p><strong>Environment:</strong> {os.environ['ENVIRONMENT']}</p>
-                          <p><strong>Region:</strong> {os.environ['AWS_REGION']}</p>
-                          <p><strong>CloudFront Domain:</strong> {os.environ['CLOUDFRONT_DOMAIN']}</p>
-                          <p><strong>API Gateway URL:</strong> {os.environ['API_GATEWAY_URL']}</p>
-                      </div>
-                      
-                      <h2>🚀 Next Steps</h2>
-                      <ol>
-                          <li><strong>Create Admin User:</strong>
-                              <div class="code">
-                                  aws cognito-idp admin-create-user \\<br>
-                                  &nbsp;&nbsp;--user-pool-id {os.environ['USER_POOL_ID']} \\<br>
-                                  &nbsp;&nbsp;--username admin \\<br>
-                                  &nbsp;&nbsp;--user-attributes Name=email,Value=admin@yourdomain.com \\<br>
-                                  &nbsp;&nbsp;--temporary-password TempPass123! \\<br>
-                                  &nbsp;&nbsp;--message-action SUPPRESS
-                              </div>
-                          </li>
-                          <li><strong>Deploy React Frontend:</strong> Replace this placeholder with your React application</li>
-                          <li><strong>Configure Authentication:</strong> Use the Cognito configuration provided</li>
-                          <li><strong>Start Using:</strong> Begin deploying your first Ollama models!</li>
-                      </ol>
-                      
-                      <h2>📚 Documentation</h2>
-                      <p>For detailed documentation and setup instructions, visit our 
-                      <a href="https://github.com/clf13092/aws-ollama-llm-platform" target="_blank">GitHub repository</a>.</p>
-                      
-                      <h2>🔒 Security Note</h2>
-                      <p>This platform includes production-ready authentication and authorization. 
-                      Make sure to review security settings before deploying to production.</p>
-                  </div>
-                  
-                  <script src="/config.js"></script>
-                  <script>
-                      console.log('AWS Ollama Platform Configuration:', window.AWS_OLLAMA_CONFIG);
-                  </script>
-              </body>
-              </html>
-              """
-              
-              # Upload files to S3
-              s3_client.put_object(
-                  Bucket=bucket_name,
-                  Key='index.html',
-                  Body=index_html.encode('utf-8'),
-                  ContentType='text/html',
-                  CacheControl='max-age=300'
-              )
-              
-              s3_client.put_object(
-                  Bucket=bucket_name,
-                  Key='config.js',
-                  Body=config_js.encode('utf-8'),
-                  ContentType='application/javascript',
-                  CacheControl='max-age=300'
-              )
-              
-              print(f"Frontend files deployed to bucket: {bucket_name}")
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-
-  # IAM Role for Deploy Frontend Lambda
-  DeployFrontendRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: S3Access
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:PutObjectAcl
-                  - s3:GetObject
-                  - s3:DeleteObject
-                Resource: !Sub '${FrontendBucket}/*'
-
-  # Custom Resource to trigger frontend deployment
-  DeployFrontend:
-    Type: AWS::CloudFormation::CustomResource
-    DependsOn: 
-      - FrontendBucket
-      - FrontendBucketPolicy
-    Properties:
-      ServiceToken: !GetAtt DeployFrontendFunction.Arn
-      BucketName: !Ref FrontendBucket
-      Timestamp: !Sub '${AWS::StackName}-${AWS::Region}-${Environment}'
+  
 
   # CloudWatch Dashboard for monitoring
   MonitoringDashboard:

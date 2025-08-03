@@ -1,0 +1,316 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'API layer for AWS Ollama Platform - Lambda Functions and API Gateway with Cognito Authentication (File-based)'
+
+Parameters:
+  Environment:
+    Type: String
+    Description: 'Environment name for resource naming'
+  
+  VPCId:
+    Type: String
+    Description: 'VPC ID for Lambda functions'
+  
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Private subnet IDs for Lambda functions'
+  
+  UserPoolId:
+    Type: String
+    Description: 'Cognito User Pool ID for authentication'
+  
+  UserPoolClientId:
+    Type: String
+    Description: 'Cognito User Pool Client ID'
+  
+  ModelsTableName:
+    Type: String
+    Description: 'DynamoDB Models table name'
+  
+  InstancesTableName:
+    Type: String
+    Description: 'DynamoDB Instances table name'
+  
+  UsersTableName:
+    Type: String
+    Description: 'DynamoDB Users table name'
+  
+  LambdaExecutionRole:
+    Type: String
+    Description: 'IAM Role ARN for Lambda execution'
+  
+  ECSTaskRole:
+    Type: String
+    Description: 'IAM Role ARN for ECS tasks'
+    
+  APIGatewayCloudWatchRoleArn:
+    Type: String
+    Description: 'IAM Role ARN for API Gateway CloudWatch Logs'
+  
+  # ECS Configuration
+  ECSClusterName:
+    Type: String
+    Description: 'ECS Cluster Name'
+  
+  ECSSecurityGroupId:
+    Type: String
+    Description: 'ECS Security Group ID'
+  
+  CPUTaskDefinitionArn:
+    Type: String
+    Description: 'CPU Task Definition ARN'
+  
+  GPUTaskDefinitionArn:
+    Type: String
+    Description: 'GPU Task Definition ARN'
+  
+  # ECR Image URIs
+  OllamaBaseImageUri:
+    Type: String
+    Description: 'Base Ollama ECR Image URI'
+    Default: ''
+  
+  OllamaLlama2_7bImageUri:
+    Type: String
+    Description: 'Llama2 7B ECR Image URI'
+    Default: ''
+  
+  OllamaLlama2_13bImageUri:
+    Type: String
+    Description: 'Llama2 13B ECR Image URI'
+    Default: ''
+  
+  OllamaCodeLlama7bImageUri:
+    Type: String
+    Description: 'CodeLlama 7B ECR Image URI'
+    Default: ''
+  
+  OllamaCodeLlama13bImageUri:
+    Type: String
+    Description: 'CodeLlama 13B ECR Image URI'
+    Default: ''
+  
+  OllamaMistral7bImageUri:
+    Type: String
+    Description: 'Mistral 7B ECR Image URI'
+    Default: ''
+
+Resources:
+  # API Gateway REST API
+  OllamaAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${Environment}-ollama-api'
+      Description: 'AWS Ollama Platform API'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 'execute-api:Invoke'
+            Resource: '*'
+
+  # Cognito Authorizer
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub '${Environment}-ollama-cognito-authorizer'
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      RestApiId: !Ref OllamaAPI
+      ProviderARNs:
+        - !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
+
+  # Lambda function for Instances API (File-based)
+  InstancesLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-ollama-instances-api'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !Ref LambdaExecutionRole
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Sub '${Environment}-ollama-platform-artifacts'
+        S3Key: 'lambda-functions/instances.zip'
+      Environment:
+        Variables:
+          MODELS_TABLE_NAME: !Ref ModelsTableName
+          INSTANCES_TABLE_NAME: !Ref InstancesTableName
+          USERS_TABLE_NAME: !Ref UsersTableName
+          USER_POOL_ID: !Ref UserPoolId
+          USER_POOL_CLIENT_ID: !Ref UserPoolClientId
+          ECS_CLUSTER_NAME: !Ref ECSClusterName
+          ECS_SECURITY_GROUP_ID: !Ref ECSSecurityGroupId
+          CPU_TASK_DEFINITION_ARN: !Ref CPUTaskDefinitionArn
+          GPU_TASK_DEFINITION_ARN: !Ref GPUTaskDefinitionArn
+          PRIVATE_SUBNET_IDS: !Join [',', !Ref PrivateSubnetIds]
+          ENVIRONMENT: !Ref Environment
+          DOMAIN_NAME: !Sub '${Environment}.ollama.platform'
+          # ECR Image URIs
+          LLAMA2_7B_IMAGE_URI: !Ref OllamaLlama2_7bImageUri
+          LLAMA2_13B_IMAGE_URI: !Ref OllamaLlama2_13bImageUri
+          CODELLAMA_7B_IMAGE_URI: !Ref OllamaCodeLlama7bImageUri
+          CODELLAMA_13B_IMAGE_URI: !Ref OllamaCodeLlama13bImageUri
+          MISTRAL_7B_IMAGE_URI: !Ref OllamaMistral7bImageUri
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: 'aws-ollama-platform'
+
+  # Lambda Security Group
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for Lambda functions'
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-lambda-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Permission for API Gateway
+  InstancesLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InstancesLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OllamaAPI}/*/*'
+
+  # API Gateway Resources and Methods
+  InstancesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ParentId: !GetAtt OllamaAPI.RootResourceId
+      PathPart: instances
+
+  InstancesGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref InstancesResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+
+  InstancesPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref InstancesResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+
+  InstancesOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref InstancesResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Individual Instance Resource
+  InstanceResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ParentId: !Ref InstancesResource
+      PathPart: '{id}'
+
+  InstanceGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref InstanceResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+
+  InstanceDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref InstanceResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - InstancesGetMethod
+      - InstancesPostMethod
+      - InstancesOptionsMethod
+      - InstanceGetMethod
+      - InstanceDeleteMethod
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      StageName: !Ref Environment
+
+  # CloudWatch Log Group for API Gateway
+  APIGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${Environment}-ollama-api'
+      RetentionInDays: 14
+
+Outputs:
+  APIGatewayURL:
+    Description: 'API Gateway URL'
+    Value: !Sub 'https://${OllamaAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-APIGatewayURL'
+
+  InstancesLambdaFunctionArn:
+    Description: 'Instances Lambda Function ARN'
+    Value: !GetAtt InstancesLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InstancesLambdaFunctionArn'

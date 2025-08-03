@@ -14,6 +14,11 @@ Parameters:
     Type: String
     Description: 'Email address for the initial admin user'
   
+  AdminTemporaryPassword:
+    Type: String
+    Description: 'Temporary password for the initial admin user'
+    NoEcho: true
+  
   EnableMFA:
     Type: String
     Default: 'false'
@@ -49,7 +54,6 @@ Resources:
           RequireLowercase: true
           RequireNumbers: true
           RequireSymbols: true
-          TemporaryPasswordValidityDays: 7
       Schema:
         - Name: email
           AttributeDataType: String
@@ -69,8 +73,6 @@ Resources:
         Project: 'aws-ollama-platform'
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: false
-        InviteMessageAction: SUPPRESS
-        TemporaryPasswordValidityDays: 7
       AccountRecoverySetting:
         RecoveryMechanisms:
           - Name: verified_email
@@ -245,6 +247,11 @@ Resources:
             Principal:
               Federated: cognito-identity.amazonaws.com
             Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
       Policies:
         - PolicyName: AdminGroupPolicy
           PolicyDocument:
@@ -277,6 +284,11 @@ Resources:
             Principal:
               Federated: cognito-identity.amazonaws.com
             Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
       Policies:
         - PolicyName: UserGroupPolicy
           PolicyDocument:
@@ -316,6 +328,11 @@ Resources:
             Principal:
               Federated: cognito-identity.amazonaws.com
             Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
       Policies:
         - PolicyName: ReadOnlyGroupPolicy
           PolicyDocument:
@@ -339,51 +356,65 @@ Resources:
         - Key: Project
           Value: 'aws-ollama-platform'
 
-  # Lambda function for custom message trigger
-  CustomMessageLambda:
+  # --- Custom Resource for Admin User Creation ---
+
+  AdminUserCreationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${Environment}-ollama-cognito-custom-message'
+      FunctionName: !Sub '${Environment}-ollama-create-admin-user'
       Runtime: python3.9
-      Handler: index.lambda_handler
-      Role: !GetAtt CustomMessageLambdaRole.Arn
+      Handler: index.handler
+      Role: !GetAtt AdminUserCreationRole.Arn
+      Timeout: 60
       Code:
         ZipFile: |
-          import json
-          
-          def lambda_handler(event, context):
-              if event['triggerSource'] == 'CustomMessage_AdminCreateUser':
-                  event['response']['emailSubject'] = 'Welcome to AWS Ollama Platform'
-                  event['response']['emailMessage'] = f"""
-                  Welcome to AWS Ollama Platform!
-                  
-                  Your temporary credentials:
-                  Username: {event['userName']}
-                  Temporary Password: {event['request']['codeParameter']}
-                  
-                  Please log in and change your password: https://{event['request']['clientMetadata']['domain'] if 'clientMetadata' in event['request'] and 'domain' in event['request']['clientMetadata'] else 'your-domain.com'}
-                  
-                  Best regards,
-                  AWS Ollama Platform Team
-                  """
-              elif event['triggerSource'] == 'CustomMessage_ForgotPassword':
-                  event['response']['emailSubject'] = 'AWS Ollama Platform - Password Reset'
-                  event['response']['emailMessage'] = f"""
-                  Password Reset Request
-                  
-                  Your verification code: {event['request']['codeParameter']}
-                  
-                  If you did not request this, please ignore this email.
-                  """
-              
-              return event
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
+          import boto3
+          import cfnresponse
+          import os
 
-  CustomMessageLambdaRole:
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                      user_pool_id = event['ResourceProperties']['UserPoolId']
+                      user_name = event['ResourceProperties']['UserName']
+                      email = event['ResourceProperties']['Email']
+                      temporary_password = event['ResourceProperties']['TemporaryPassword']
+
+                      cognito_client = boto3.client('cognito-idp')
+
+                      # Check if user already exists
+                      try:
+                          cognito_client.admin_get_user(
+                              UserPoolId=user_pool_id,
+                              Username=user_name
+                          )
+                          print(f"User {user_name} already exists. Skipping creation.")
+                      except cognito_client.exceptions.UserNotFoundException:
+                          print(f"Creating user {user_name}...")
+                          cognito_client.admin_create_user(
+                              UserPoolId=user_pool_id,
+                              Username=user_name,
+                              UserAttributes=[
+                                  {
+                                      'Name': 'email',
+                                      'Value': email
+                                  },
+                                  {
+                                      'Name': 'email_verified',
+                                      'Value': 'true'
+                                  }
+                              ],
+                              TemporaryPassword=temporary_password,
+                              MessageAction='SUPPRESS'
+                          )
+                          print(f"User {user_name} created successfully.")
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "CustomResourcePhysicalId")
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  AdminUserCreationRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -395,69 +426,26 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  # Permission for Cognito to invoke Lambda
-  CognitoLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref CustomMessageLambda
-      Action: lambda:InvokeFunction
-      Principal: cognito-idp.amazonaws.com
-      SourceArn: !GetAtt UserPool.Arn
-
-  # Update User Pool with Lambda Trigger
-  UserPoolLambdaConfig:
-    Type: AWS::Cognito::UserPool
-    Properties:
-      UserPoolName: !Sub '${Environment}-ollama-users'
-      AliasAttributes:
-        - email
-      AutoVerifiedAttributes:
-        - email
-      EmailConfiguration:
-        EmailSendingAccount: COGNITO_DEFAULT
-      LambdaConfig:
-        CustomMessage: !GetAtt CustomMessageLambda.Arn
-      MfaConfiguration: !If [EnableMFACondition, 'ON', 'OFF']
-      EnabledMfas: !If 
-        - EnableMFACondition
-        - ['SMS_MFA', 'SOFTWARE_TOKEN_MFA']
-        - !Ref AWS::NoValue
       Policies:
-        PasswordPolicy:
-          MinimumLength: 8
-          RequireUppercase: true
-          RequireLowercase: true
-          RequireNumbers: true
-          RequireSymbols: true
-          TemporaryPasswordValidityDays: 7
-      Schema:
-        - Name: email
-          AttributeDataType: String
-          Required: true
-          Mutable: true
-        - Name: name
-          AttributeDataType: String
-          Required: false
-          Mutable: true
-        - Name: role
-          AttributeDataType: String
-          Required: false
-          Mutable: true
-          DeveloperOnlyAttribute: false
-      UserPoolTags:
-        Environment: !Ref Environment
-        Project: 'aws-ollama-platform'
-      AdminCreateUserConfig:
-        AllowAdminCreateUserOnly: false
-        InviteMessageAction: SUPPRESS
-        TemporaryPasswordValidityDays: 7
-      AccountRecoverySetting:
-        RecoveryMechanisms:
-          - Name: verified_email
-            Priority: 1
-      UsernameConfiguration:
-        CaseSensitive: false
+        - PolicyName: CognitoAdminUserCreationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                Resource: !GetAtt UserPool.Arn
+
+  AdminUserCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: UserPool
+    Properties:
+      ServiceToken: !GetAtt AdminUserCreationFunction.Arn
+      UserPoolId: !Ref UserPool
+      UserName: 'admin'
+      Email: !Ref AdminEmail
+      TemporaryPassword: !Ref AdminTemporaryPassword
 
 Outputs:
   UserPoolId:

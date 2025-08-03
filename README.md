@@ -23,63 +23,254 @@ This project provides a complete AWS-based solution for deploying and managing O
 - 📊 **Comprehensive monitoring** and logging
 - 🎯 **One-click CloudFormation deployment**
 
-## 🏗️ Architecture
+## 🏗️ Current Architecture
+
+### **High-Level Architecture Diagram**
 
 ```mermaid
 graph TB
-    User[Users] --> CF[CloudFront]
-    User --> ALB[Application Load Balancer]
+    User[👤 Users] --> CF[☁️ CloudFront]
+    User --> ALB[⚖️ Application Load Balancer]
     
-    CF --> S3[S3 Static Website<br/>Management UI]
+    CF --> S3[📦 S3 Static Website<br/>React Management UI]
     
-    S3 --> Cognito[AWS Cognito<br/>Authentication]
-    S3 --> APIGW[API Gateway<br/>Cognito Authorizer]
+    S3 --> Cognito[🔐 AWS Cognito<br/>User Authentication]
+    S3 --> APIGW[🌐 API Gateway<br/>Cognito Authorizer]
     
     Cognito --> APIGW
-    APIGW --> Lambda[Lambda Functions<br/>API Backend]
+    APIGW --> Lambda[⚡ Lambda Functions<br/>API Backend]
     
-    Lambda --> DDB[DynamoDB<br/>Metadata Management]
-    Lambda --> ECS[ECS Cluster]
+    Lambda --> DDB[🗄️ DynamoDB<br/>Models & Instances]
+    Lambda --> ECS[🐳 ECS Cluster<br/>Container Orchestration]
+    Lambda --> ECR[📦 ECR<br/>Container Registry]
     
-    ECS --> TaskDef[Task Definition<br/>CPU/GPU Support]
-    TaskDef --> OllamaTask1[Ollama Task 1<br/>llama2:7b]
-    TaskDef --> OllamaTask2[Ollama Task 2<br/>codellama:13b]
-    TaskDef --> OllamaTaskN[Ollama Task N<br/>Other Models]
+    ECS --> TaskDef[📋 Task Definitions<br/>CPU/GPU Support]
+    TaskDef --> OllamaTask1[🤖 Ollama Container 1<br/>llama2:7b]
+    TaskDef --> OllamaTask2[🤖 Ollama Container 2<br/>codellama:13b]
+    TaskDef --> OllamaTaskN[🤖 Ollama Container N<br/>Other Models]
     
     OllamaTask1 --> ALB
     OllamaTask2 --> ALB
     OllamaTaskN --> ALB
     
-    Lambda --> CW[CloudWatch<br/>Logs & Metrics]
+    Lambda --> CW[📊 CloudWatch<br/>Logs & Metrics]
     
-    subgraph VPC[VPC]
-        subgraph PublicSubnet[Public Subnet]
+    subgraph VPC[🏢 VPC - Secure Network]
+        subgraph PublicSubnet[🌐 Public Subnet]
             ALB
         end
         
-        subgraph PrivateSubnet[Private Subnet]
+        subgraph PrivateSubnet[🔒 Private Subnet]
             ECS
             OllamaTask1
             OllamaTask2
             OllamaTaskN
+            Lambda
         end
     end
     
-    subgraph AuthLayer[Authentication & Security Layer]
+    subgraph AuthLayer[🔐 Authentication & Security Layer]
         Cognito
-        UserPool[User Pool<br/>User Management]
-        IdentityPool[Identity Pool<br/>AWS Permissions]
+        UserPool[👥 User Pool<br/>User Management]
+        IdentityPool[🆔 Identity Pool<br/>AWS Permissions]
         
         Cognito --> UserPool
         Cognito --> IdentityPool
     end
 ```
 
+### **🔄 Complete Application Flow**
+
+#### **1. User Authentication Flow**
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant CF as ☁️ CloudFront
+    participant S3 as 📦 S3 (React App)
+    participant Cognito as 🔐 Cognito
+    participant APIGW as 🌐 API Gateway
+    
+    U->>CF: 1. Access Application
+    CF->>S3: 2. Serve React App
+    S3->>U: 3. Login Page
+    U->>S3: 4. Enter Credentials
+    S3->>Cognito: 5. Authentication Request
+    Cognito->>S3: 6. JWT Token
+    S3->>U: 7. Dashboard Access
+    
+    Note over U,APIGW: User is now authenticated with JWT token
+```
+
+#### **2. Model Deployment Flow**
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant UI as 🖥️ React UI
+    participant APIGW as 🌐 API Gateway
+    participant Lambda as ⚡ Lambda
+    participant DDB as 🗄️ DynamoDB
+    participant ECR as 📦 ECR
+    participant ECS as 🐳 ECS
+    participant Task as 🤖 Ollama Container
+    
+    U->>UI: 1. Select Model & Instance Type
+    UI->>APIGW: 2. POST /instances (with JWT)
+    APIGW->>Lambda: 3. Validate & Route Request
+    Lambda->>DDB: 4. Get Model Configuration
+    Lambda->>ECR: 5. Get Container Image URI
+    Lambda->>ECS: 6. Start ECS Task
+    ECS->>Task: 7. Deploy Ollama Container
+    Task->>Task: 8. Download & Load Model
+    Lambda->>DDB: 9. Save Instance Metadata
+    Lambda->>UI: 10. Return Endpoint URL
+    UI->>U: 11. Display Running Instance
+    
+    Note over Task: Container is now running and ready for inference
+```
+
+#### **3. Model Inference Flow**
+```mermaid
+sequenceDiagram
+    participant U as 👤 User/App
+    participant ALB as ⚖️ Load Balancer
+    participant Task as 🤖 Ollama Container
+    participant Model as 🧠 LLM Model
+    
+    U->>ALB: 1. POST /api/generate
+    ALB->>Task: 2. Route to Container
+    Task->>Model: 3. Process Prompt
+    Model->>Task: 4. Generate Response
+    Task->>ALB: 5. Return Response
+    ALB->>U: 6. Deliver Result
+    
+    Note over Model: Model processes inference in memory
+```
+
+### **🏗️ Infrastructure Components**
+
+#### **Frontend Layer**
+- **CloudFront**: Global CDN for React application
+- **S3**: Static website hosting with versioning
+- **React App**: TypeScript-based management interface
+- **Authentication**: AWS Amplify-free Cognito integration
+
+#### **API Layer**
+- **API Gateway**: RESTful API with Cognito authorization
+- **Lambda Functions**: Serverless API backend
+  - `instances-api`: Model deployment and management
+  - `models-api`: Available model information
+  - `auth-api`: User authentication helpers
+
+#### **Container Layer**
+- **ECR**: Private container registry for Ollama images
+  - Base Ollama image
+  - Model-specific pre-built images (llama2, codellama, mistral)
+- **ECS**: Container orchestration
+  - **Fargate**: For CPU-based models (ml.m5.*)
+  - **EC2**: For GPU-based models (ml.g4dn.*, ml.p3.*)
+- **Task Definitions**: Dynamic selection based on model requirements
+
+#### **Data Layer**
+- **DynamoDB**: NoSQL database for metadata
+  - Models table: Available model configurations
+  - Instances table: Running instance information
+  - Users table: User preferences and quotas
+
+#### **Network Layer**
+- **VPC**: Isolated network environment
+- **Private Subnets**: ECS tasks and Lambda functions
+- **Public Subnets**: Application Load Balancer
+- **Security Groups**: Fine-grained access control
+
+### **🔧 Instance Type Management**
+
+#### **Dynamic Task Definition Selection**
+```python
+def get_task_configuration(model_id, instance_type):
+    # GPU instances require EC2 launch type
+    if instance_type in ['ml.g4dn.xlarge', 'ml.g4dn.2xlarge', 'ml.p3.2xlarge']:
+        return {
+            'launch_type': 'EC2',
+            'task_definition': GPU_TASK_DEFINITION_ARN,
+            'placement_constraints': [
+                {
+                    'type': 'memberOf',
+                    'expression': f'attribute:ecs.instance-type == {instance_type}'
+                }
+            ]
+        }
+    
+    # CPU instances use Fargate
+    else:
+        return {
+            'launch_type': 'FARGATE',
+            'task_definition': CPU_TASK_DEFINITION_ARN
+        }
+```
+
+#### **Model-Specific Container Images**
+| Model | ECR Image | Instance Type | Launch Type |
+|-------|-----------|---------------|-------------|
+| Llama2 7B | `production-ollama-llama2-7b` | ml.m5.large | Fargate |
+| Llama2 13B | `production-ollama-llama2-13b` | ml.m5.xlarge | Fargate |
+| CodeLlama 7B | `production-ollama-codellama-7b` | ml.m5.large | Fargate |
+| CodeLlama 13B | `production-ollama-codellama-13b` | ml.g4dn.xlarge | EC2 |
+| Mistral 7B | `production-ollama-mistral-7b` | ml.m5.large | Fargate |
+
+### **🔐 Security Architecture**
+
+#### **Authentication & Authorization**
+- **Cognito User Pool**: Centralized user management
+- **JWT Tokens**: Stateless authentication
+- **API Gateway Authorizer**: Automatic token validation
+- **Role-based Access**: Admin vs User permissions
+
+#### **Network Security**
+- **VPC Isolation**: All resources in private network
+- **Security Groups**: Least-privilege access
+- **HTTPS Everywhere**: End-to-end encryption
+- **Private Subnets**: No direct internet access for containers
+
+#### **Data Security**
+- **Encryption at Rest**: DynamoDB and S3
+- **Encryption in Transit**: All API communications
+- **User Isolation**: Each user can only access their own instances
+- **Audit Logging**: All actions logged to CloudWatch
+
+### **💰 Cost Optimization Features**
+
+#### **Resource Management**
+- **Automatic Shutdown**: Idle instances stopped after timeout
+- **Right-sizing**: Appropriate instance types per model
+- **Spot Instances**: Optional for development workloads
+- **Pay-per-use**: Only pay when models are running
+
+#### **Container Optimization**
+- **Pre-built Images**: Faster startup times
+- **Model Caching**: Reduced download times
+- **Resource Limits**: Prevent resource waste
+- **Health Checks**: Automatic failure recovery
+
+### **📊 Monitoring & Observability**
+
+#### **Metrics & Logging**
+- **CloudWatch Metrics**: ECS, Lambda, API Gateway
+- **Application Logs**: Centralized logging
+- **Performance Monitoring**: Response times and error rates
+- **Cost Tracking**: Real-time cost monitoring
+
+#### **Alerting**
+- **Health Checks**: Container and service health
+- **Error Alerts**: Failed deployments and API errors
+- **Cost Alerts**: Budget threshold notifications
+- **Security Alerts**: Authentication failures
+
 ## 🚀 Quick Start
 
 ### Prerequisites
 - AWS Account with appropriate permissions
 - AWS CLI configured
+- Docker installed and running
 - Domain name (optional, for custom endpoints)
 - Email address for admin account
 
@@ -112,33 +303,30 @@ cat > parameters.json << EOF
 ]
 EOF
 
-# Deploy the stack
-aws cloudformation create-stack \
-  --stack-name aws-ollama-platform \
-  --template-body file://cloudformation/main.yaml \
-  --parameters file://parameters.json \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
-
-# Create initial admin user (after stack deployment completes)
-aws cognito-idp admin-create-user \
-  --user-pool-id <USER_POOL_ID> \
-  --username admin \
-  --user-attributes Name=email,Value=admin@yourdomain.com \
-  --temporary-password TempPass123! \
-  --message-action SUPPRESS
+# Deploy the complete stack (ECR + Docker images + Infrastructure)
+sh scripts/deploy.sh
 ```
 
 ### 2. Access Management Interface
 
-After deployment completes (~15-20 minutes):
+After deployment completes (~20-30 minutes):
 
-1. **Get the CloudFront URL** from the stack outputs
+1. **Get the CloudFront URL** from the deployment output
 2. **Open the management interface** in your browser
-3. **Login with admin credentials**:
+3. **Create admin user**:
+   ```bash
+   aws cognito-idp admin-create-user \
+     --user-pool-id <USER_POOL_ID> \
+     --username admin \
+     --user-attributes Name=email,Value=admin@yourdomain.com \
+     --temporary-password TempPass123! \
+     --message-action SUPPRESS
+   ```
+4. **Login with admin credentials**:
    - Username: `admin`
    - Temporary Password: `TempPass123!`
-4. **Set permanent password** when prompted
-5. **Access the dashboard** to manage your LLM models
+5. **Set permanent password** when prompted
+6. **Access the dashboard** to manage your LLM models
 
 ### 3. Deploy Your First Model
 
@@ -148,6 +336,53 @@ After deployment completes (~15-20 minutes):
 4. **Choose instance type** (CPU/GPU based on requirements)
 5. **Click "Deploy Model"**
 6. **Get your API endpoint URL** from the instances list
+
+### 4. Test Model Inference
+
+```bash
+# Example API call to deployed model
+curl -X POST https://your-alb-endpoint.amazonaws.com/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama2:7b",
+    "prompt": "Explain quantum computing in simple terms",
+    "stream": false
+  }'
+```
+
+## 🔧 Development Workflow
+
+### **Lambda Function Development**
+
+```bash
+# 1. Modify Lambda functions in lambda-functions/ directory
+# 2. Package and deploy Lambda functions
+sh scripts/package-lambda.sh
+
+# 3. Update CloudFormation stack
+sh scripts/deploy.sh
+```
+
+### **Docker Image Updates**
+
+```bash
+# 1. Modify Dockerfiles in docker/ directory
+# 2. Build and push new images
+sh scripts/build-and-push-images.sh
+
+# 3. Update ECS tasks (automatic with new deployment)
+```
+
+### **Frontend Development**
+
+```bash
+# 1. Develop locally
+cd src/test/my-app
+npm run dev
+
+# 2. Deploy changes
+sh scripts/deploy.sh
+```
 
 ## 🔒 Authentication & Security
 

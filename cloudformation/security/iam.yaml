@@ -276,10 +276,8 @@ Resources:
             Principal:
               Service: application-autoscaling.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSServiceRolePolicy
       Policies:
-        - PolicyName: ECSScaling
+        - PolicyName: ApplicationAutoScalingECSPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -287,9 +285,17 @@ Resources:
                 Action:
                   - ecs:UpdateService
                   - ecs:DescribeServices
+                  - ecs:DescribeClusters
+                  - ecs:DescribeTaskDefinition
                   - cloudwatch:DescribeAlarms
                   - cloudwatch:PutMetricAlarm
                   - cloudwatch:DeleteAlarms
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:SetAlarmState
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:*
                 Resource: '*'
       Tags:
         - Key: Environment

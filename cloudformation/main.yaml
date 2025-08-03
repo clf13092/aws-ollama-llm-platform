@@ -16,8 +16,16 @@ Parameters:
   AdminEmail:
     Type: String
     Description: 'Email address for the initial admin user'
-    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    AllowedPattern: '^[^
+@]+@[^
+@]+\.[^
+@]+$'
     ConstraintDescription: 'Must be a valid email address'
+  
+  AdminTemporaryPassword:
+    Type: String
+    Description: 'Temporary password for the initial admin user'
+    NoEcho: true
   
   EnableMFA:
     Type: String
@@ -48,6 +56,7 @@ Metadata:
           default: "Security Configuration"
         Parameters:
           - AdminEmail
+          - AdminTemporaryPassword
           - EnableMFA
           - CertificateArn
       - Label:
@@ -97,6 +106,7 @@ Resources:
         Environment: !Ref Environment
         DomainName: !Ref DomainName
         AdminEmail: !Ref AdminEmail
+        AdminTemporaryPassword: !Ref AdminTemporaryPassword
         EnableMFA: !Ref EnableMFA
       Tags:
         - Key: Environment
@@ -138,6 +148,7 @@ Resources:
         UsersTableName: !GetAtt StorageStack.Outputs.UsersTableName
         LambdaExecutionRole: !GetAtt SecurityStack.Outputs.LambdaExecutionRole
         ECSTaskRole: !GetAtt SecurityStack.Outputs.ECSTaskRole
+        APIGatewayCloudWatchRoleArn: !GetAtt SecurityStack.Outputs.APIGatewayCloudWatchRole
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -240,6 +251,12 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-CloudFrontURL'
   
+  CloudFrontDistributionId:
+    Description: 'CloudFront distribution ID for the management interface'
+    Value: !GetAtt FrontendStack.Outputs.CloudFrontDistributionId
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDistributionId'
+  
   S3BucketName:
     Description: 'S3 bucket name for frontend hosting'
     Value: !GetAtt FrontendStack.Outputs.S3BucketName
@@ -273,11 +290,3 @@ Outputs:
            --message-action SUPPRESS
       3. Login with admin credentials and change password
       4. Start deploying your first Ollama model!
-
-Tags:
-  - Key: Environment
-    Value: !Ref Environment
-  - Key: Project
-    Value: 'aws-ollama-platform'
-  - Key: Version
-    Value: '1.0.0'

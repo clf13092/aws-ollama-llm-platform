@@ -290,8 +290,8 @@ Resources:
         - IpProtocol: tcp
           FromPort: 11434
           ToPort: 11434
-          DestinationSecurityGroupId: !Ref ECSSecurityGroup
-          Description: 'Ollama API traffic to ECS'
+          CidrIp: '10.0.0.0/16'
+          Description: 'Ollama API traffic to ECS (VPC internal)'
       Tags:
         - Key: Name
           Value: !Sub '${Environment}-ollama-alb-sg'

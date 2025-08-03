@@ -1,26 +1,22 @@
 [
   {
     "ParameterKey": "Environment",
-    "ParameterValue": "production"
+    "ParameterValue": "dev"
   },
   {
     "ParameterKey": "DomainName",
-    "ParameterValue": "ollama.yourdomain.com"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "AdminEmail",
-    "ParameterValue": "admin@yourdomain.com"
+    "ParameterValue": "admin@example.com"
+  },
+  {
+    "ParameterKey": "AdminTemporaryPassword",
+    "ParameterValue": "ChangeMe123!"
   },
   {
     "ParameterKey": "EnableMFA",
     "ParameterValue": "false"
-  },
-  {
-    "ParameterKey": "CertificateArn",
-    "ParameterValue": ""
-  },
-  {
-    "ParameterKey": "DBInstanceClass",
-    "ParameterValue": "db.t3.micro"
   }
 ]
