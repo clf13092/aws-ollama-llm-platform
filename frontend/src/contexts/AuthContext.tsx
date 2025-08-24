@@ -1,18 +1,22 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { AuthService } from '../services/authService';
+import { createContext, useContext, useState, useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { AuthService, type NewPasswordData } from '../services/authService';
 import type { AuthUser } from '../services/authService';
 
 interface AuthContextType {
   user: AuthUser | null;
   loading: boolean;
   isAuthenticated: boolean;
-  signIn: (username: string, password: string) => Promise<{ success: boolean; message: string }>;
+  needsNewPassword: boolean;
+  signIn: (username: string, password: string) => Promise<{ success: boolean; message: string; needsNewPassword?: boolean }>;
+  completeNewPassword: (data: NewPasswordData) => Promise<{ success: boolean; message: string }>;
   signUp: (username: string, password: string, email: string, name?: string) => Promise<{ success: boolean; message: string; needsConfirmation?: boolean }>;
   confirmSignUp: (username: string, code: string) => Promise<{ success: boolean; message: string }>;
   forgotPassword: (username: string) => Promise<{ success: boolean; message: string }>;
   confirmPassword: (username: string, code: string, newPassword: string) => Promise<{ success: boolean; message: string }>;
   signOut: () => Promise<void>;
   getAccessToken: () => Promise<string | null>;
+  resetNewPasswordState: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -25,6 +29,7 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [needsNewPassword, setNeedsNewPassword] = useState(false);
 
   // 初期化時に認証状態をチェック
   useEffect(() => {
@@ -60,6 +65,10 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
       if (result.success && result.user) {
         setUser(result.user);
         setIsAuthenticated(true);
+        setNeedsNewPassword(false);
+      } else if (result.needsNewPassword) {
+        setNeedsNewPassword(true);
+        setIsAuthenticated(false);
       }
       
       return result;
@@ -69,6 +78,29 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
         message: 'ログインに失敗しました'
       };
     }
+  };
+
+  const completeNewPassword = async (data: NewPasswordData) => {
+    try {
+      const result = await AuthService.completeNewPasswordChallenge(data);
+      
+      if (result.success && result.user) {
+        setUser(result.user);
+        setIsAuthenticated(true);
+        setNeedsNewPassword(false);
+      }
+      
+      return result;
+    } catch (error) {
+      return {
+        success: false,
+        message: 'パスワード設定に失敗しました'
+      };
+    }
+  };
+
+  const resetNewPasswordState = () => {
+    setNeedsNewPassword(false);
   };
 
   const signUp = async (username: string, password: string, email: string, name?: string) => {
@@ -120,6 +152,7 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
       await AuthService.signOut();
       setUser(null);
       setIsAuthenticated(false);
+      setNeedsNewPassword(false);
     } catch (error) {
       console.error('サインアウトに失敗:', error);
     }
@@ -138,13 +171,16 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
     user,
     loading,
     isAuthenticated,
+    needsNewPassword,
     signIn,
+    completeNewPassword,
     signUp,
     confirmSignUp,
     forgotPassword,
     confirmPassword,
     signOut,
-    getAccessToken
+    getAccessToken,
+    resetNewPasswordState
   };
 
   return (

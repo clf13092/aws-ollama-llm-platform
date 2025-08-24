@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Compute layer for AWS Ollama Platform - ECS Cluster, ALB, and Auto Scaling'
+Description: 'Compute layer for AWS Ollama Platform - ECS Cluster, ALB, and GPU Capacity Provider (Task Definitions created dynamically)'
 
 Parameters:
   Environment:
@@ -13,21 +13,42 @@ Parameters:
   PrivateSubnetIds:
     Type: CommaDelimitedList
     Description: 'Private subnet IDs for ECS tasks'
-  
+
   PublicSubnetIds:
     Type: CommaDelimitedList
     Description: 'Public subnet IDs for ALB'
-  
-  ECSTaskRole:
-    Type: String
-    Description: 'IAM Role ARN for ECS tasks'
-  
-  ECSExecutionRole:
-    Type: String
-    Description: 'IAM Role ARN for ECS task execution'
 
-Conditions:
-  IsProduction: !Equals [!Ref Environment, 'production']
+  VpcCidrBlock:
+    Type: String
+    Description: 'CIDR block of the VPC to allow traffic from within the VPC'
+
+  # ==== GPU ノード用 追加パラメータ ====
+  GPUInstanceType:
+    Type: String
+    Default: g5.xlarge
+    Description: 'EC2 instance type for GPU nodes (e.g., g5.xlarge, g5.2xlarge, g6.xlarge)'
+  GPUAsgDesiredCapacity:
+    Type: Number
+    Default: 0
+    Description: 'Desired capacity for GPU AutoScalingGroup'
+  GPUAsgMinSize:
+    Type: Number
+    Default: 0
+    Description: 'Min size for GPU AutoScalingGroup'
+  GPUAsgMaxSize:
+    Type: Number
+    Default: 2
+    Description: 'Max size for GPU AutoScalingGroup'
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 200
+    Description: 'Root volume size (GiB) for GPU instances (models/cache)'
+
+  # ECS GPU最適化 AMI (SSM)
+  ECSGPUAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ecs/optimized-ami/amazon-linux-2/gpu/recommended/image_id'
+    Description: 'ECS GPU-optimized AMI ID from SSM Parameter Store'
 
 Resources:
   # ECS Cluster
@@ -35,19 +56,9 @@ Resources:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub '${Environment}-ollama-cluster'
-      CapacityProviders:
-        - FARGATE
-        - FARGATE_SPOT
-      DefaultCapacityProviderStrategy:
-        - CapacityProvider: FARGATE
-          Weight: 1
-          Base: 0
-        - CapacityProvider: FARGATE_SPOT
-          Weight: !If [IsProduction, 0, 4]
-          Base: 0
       ClusterSettings:
         - Name: containerInsights
-          Value: !If [IsProduction, 'enabled', 'disabled']
+          Value: 'enabled'
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -60,469 +71,298 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-ollama-alb'
       Type: application
-      Scheme: internal
+      Scheme: internet-facing
       IpAddressType: ipv4
-      Subnets: !Ref PrivateSubnetIds
+      Subnets: !Ref PublicSubnetIds
       SecurityGroups:
         - !Ref ALBSecurityGroup
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
-          Value: '60'
-        - Key: routing.http2.enabled
-          Value: 'true'
-        - Key: access_logs.s3.enabled
-          Value: 'false'
-        - Key: deletion_protection.enabled
-          Value: 'false'
+          Value: '600'
       Tags:
         - Key: Environment
           Value: !Ref Environment
         - Key: Project
           Value: 'aws-ollama-platform'
 
-  # ALB Security Group
+  # ALB SG
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: 'Security group for Application Load Balancer'
+      GroupDescription: 'Controls access to the Application Load Balancer'
       VpcId: !Ref VPCId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: '0.0.0.0/0'
-          Description: 'HTTP traffic'
+          CidrIp: 0.0.0.0/0
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: '0.0.0.0/0'
-          Description: 'HTTPS traffic'
+          CidrIp: 0.0.0.0/0
       SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: 11434
-          ToPort: 11434
-          CidrIp: '10.0.0.0/16'
-          Description: 'Ollama API traffic to ECS (VPC internal)'
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
           Value: !Sub '${Environment}-ollama-alb-sg'
-        - Key: Environment
-          Value: !Ref Environment
 
-  # ECS Security Group
+  # ECS タスク用 SG（ALB → 8080/TCP）
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: 'Security group for ECS tasks running Ollama'
+      GroupDescription: 'Controls access for ECS tasks'
       VpcId: !Ref VPCId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 11434
-          ToPort: 11434
+          FromPort: 8080
+          ToPort: 8080
           SourceSecurityGroupId: !Ref ALBSecurityGroup
-          Description: 'Ollama API from ALB'
       SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: '0.0.0.0/0'
-          Description: 'HTTPS outbound for model downloads'
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: '0.0.0.0/0'
-          Description: 'HTTP outbound for health checks'
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
           Value: !Sub '${Environment}-ollama-ecs-sg'
-        - Key: Environment
-          Value: !Ref Environment
 
-  # Default Target Group (required for ALB)
-  DefaultTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  # ECS コンテナログ用 LogGroup
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
     Properties:
-      Name: !Sub '${Environment}-ollama-default-tg'
-      Port: 11434
-      Protocol: HTTP
-      VpcId: !Ref VPCId
-      TargetType: ip
-      HealthCheckEnabled: true
-      HealthCheckIntervalSeconds: 30
-      HealthCheckPath: '/api/tags'
-      HealthCheckPort: traffic-port
-      HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 2
-      Matcher:
-        HttpCode: '200'
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: '300'
-        - Key: stickiness.enabled
-          Value: 'false'
+      LogGroupName: !Sub '/ecs/${Environment}-ollama'
+      RetentionInDays: 7
       Tags:
         - Key: Environment
           Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
 
-  # ALB Listener
+  # ALB Listener (HTTP)
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       DefaultActions:
         - Type: fixed-response
           FixedResponseConfig:
-            StatusCode: '200'
+            StatusCode: '404'
             ContentType: 'text/plain'
-            MessageBody: 'AWS Ollama Platform - No active models'
+            MessageBody: 'No active Ollama instances'
       LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 80
       Protocol: HTTP
 
-  # HTTPS Listener (if certificate is provided)
-  # Note: Certificate ARN would need to be passed as parameter
-  # ALBListenerHTTPS:
-  #   Type: AWS::ElasticLoadBalancingV2::Listener
-  #   Properties:
-  #     DefaultActions:
-  #       - Type: redirect
-  #         RedirectConfig:
-  #           Protocol: HTTPS
-  #           Port: 443
-  #           StatusCode: HTTP_301
-  #     LoadBalancerArn: !Ref ApplicationLoadBalancer
-  #     Port: 443
-  #     Protocol: HTTPS
-  #     Certificates:
-  #       - CertificateArn: !Ref CertificateArn
-
-  # CloudWatch Log Group for ECS
-  ECSLogGroup:
-    Type: AWS::Logs::LogGroup
+  # 既定のTG（参考用/未使用想定。ダイナミックなTGはAPI側で作成）
+  DefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      LogGroupName: !Sub '/ecs/${Environment}-ollama'
-      RetentionInDays: !If [IsProduction, 30, 7]
+      Name: !Sub '${Environment}-ollama-default-tg'
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VPCId
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: '/api/tags'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ======= ここから GPU ノード（EC2）一式 =======
+
+  # ECS GPU インスタンス用 IAM ロール & インスタンスプロファイル
+  ECSGPUInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
       Tags:
         - Key: Environment
           Value: !Ref Environment
         - Key: Project
           Value: 'aws-ollama-platform'
 
-  # Task Definition Template for Ollama Models
-  OllamaTaskDefinition:
-    Type: AWS::ECS::TaskDefinition
+  ECSGPUInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
     Properties:
-      Family: !Sub '${Environment}-ollama-model'
-      NetworkMode: awsvpc
-      RequiresCompatibilities:
-        - FARGATE
-        - EC2
-      Cpu: '1024'
-      Memory: '4096'
-      ExecutionRoleArn: !Ref ECSExecutionRole
-      TaskRoleArn: !Ref ECSTaskRole
-      ContainerDefinitions:
-        - Name: ollama
-          Image: 'ollama/ollama:latest'
-          Essential: true
-          PortMappings:
-            - ContainerPort: 11434
-              Protocol: tcp
-          Environment:
-            - Name: OLLAMA_HOST
-              Value: '0.0.0.0'
-            - Name: OLLAMA_ORIGINS
-              Value: '*'
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - 'curl -f http://localhost:11434/api/tags || exit 1'
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 60
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref ECSLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: 'ollama'
-          MountPoints: []
-          VolumesFrom: []
+      Roles: [!Ref ECSGPUInstanceRole]
+      InstanceProfileName: !Sub '${Environment}-ecs-gpu-instance-profile'
+
+  # ECS GPU インスタンス用 SG（管理/SSMのみ想定、入れ口なし・全アウトバウンド）
+  ECSInstancesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for ECS GPU instances (no inbound; SSM recommended)'
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
       Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-ecs-gpu-instances-sg'
+
+  # GPU ノード用 Launch Template
+  GPUNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${Environment}-ecs-gpu-lt'
+      LaunchTemplateData:
+        ImageId: !Ref ECSGPUAmiId
+        InstanceType: !Ref GPUInstanceType
+        IamInstanceProfile:
+          Name: !Ref ECSGPUInstanceProfile
+        SecurityGroupIds: [!Ref ECSInstancesSecurityGroup]
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref RootVolumeSizeGiB
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "ECS_CLUSTER=${ECSCluster}" >> /etc/ecs/ecs.config
+            echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
+            systemctl enable --now ecs
+
+  # GPU ノード Auto Scaling Group
+  GPUAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${Environment}-ecs-gpu-asg'
+      VPCZoneIdentifier: !Ref PrivateSubnetIds
+      MinSize: !Ref GPUAsgMinSize
+      MaxSize: !Ref GPUAsgMaxSize
+      DesiredCapacity: !Ref GPUAsgDesiredCapacity
+      NewInstancesProtectedFromScaleIn: true
+      CapacityRebalance: true
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref GPUNodeLaunchTemplate
+            Version: !GetAtt GPUNodeLaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: g5.xlarge
+            - InstanceType: g5.2xlarge
+            - InstanceType: g6.xlarge
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: 0        # ← まずは全Spotで動かす
+          SpotAllocationStrategy: capacity-optimized-prioritized
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-ecs-gpu'
+          PropagateAtLaunch: true
         - Key: Environment
           Value: !Ref Environment
+          PropagateAtLaunch: true
         - Key: Project
           Value: 'aws-ollama-platform'
+          PropagateAtLaunch: true
 
-  # Task Definition for GPU-enabled instances
-  OllamaGPUTaskDefinition:
-    Type: AWS::ECS::TaskDefinition
+
+
+
+
+  # Capacity Provider（ASG と ECS の橋渡し）
+  GPUCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
     Properties:
-      Family: !Sub '${Environment}-ollama-model-gpu'
-      NetworkMode: awsvpc
-      RequiresCompatibilities:
-        - EC2
-      Cpu: '2048'
-      Memory: '8192'
-      ExecutionRoleArn: !Ref ECSExecutionRole
-      TaskRoleArn: !Ref ECSTaskRole
-      PlacementConstraints:
-        - Type: memberOf
-          Expression: 'attribute:ecs.instance-type =~ g4dn.*'
-      ContainerDefinitions:
-        - Name: ollama
-          Image: 'ollama/ollama:latest'
-          Essential: true
-          PortMappings:
-            - ContainerPort: 11434
-              Protocol: tcp
-          Environment:
-            - Name: OLLAMA_HOST
-              Value: '0.0.0.0'
-            - Name: OLLAMA_ORIGINS
-              Value: '*'
-            # NVIDIA_VISIBLE_DEVICES環境変数を削除（ECSが自動的に設定するため）
-          ResourceRequirements:
-            - Type: GPU
-              Value: '1'
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - 'curl -f http://localhost:11434/api/tags || exit 1'
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 120
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref ECSLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: 'ollama-gpu'
-          MountPoints: []
-          VolumesFrom: []
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
+      Name: !Sub '${Environment}-gpu-ec2'
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref GPUAutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 70
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 100
+        ManagedTerminationProtection: ENABLED
 
-  # EC2 Launch Template for GPU instances (commented out to avoid circular dependency)
-  # EC2LaunchTemplate:
-  #   Type: AWS::EC2::LaunchTemplate
-  #   Properties:
-  #     LaunchTemplateName: !Sub '${Environment}-ollama-gpu-template'
-  #     LaunchTemplateData:
-  #       ImageId: ami-0c02fb55956c7d316  # ECS-optimized Amazon Linux 2 with GPU support
-  #       InstanceType: g4dn.xlarge
-  #       IamInstanceProfile:
-  #         Arn: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/${Environment}-ollama-ec2-instance-profile'
-  #       UserData:
-  #         Fn::Base64: !Sub |
-  #           #!/bin/bash
-  #           echo "ECS_CLUSTER=${ECSCluster}" >> /etc/ecs/ecs.config
-  #           echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
-  #           yum update -y
-  #           yum install -y ecs-init
-  #           service docker start
-  #           start ecs
-  #       TagSpecifications:
-  #         - ResourceType: instance
-  #           Tags:
-  #             - Key: Name
-  #               Value: !Sub '${Environment}-ollama-gpu-instance'
-  #             - Key: Environment
-  #               Value: !Ref Environment
-  #             - Key: Project
-  #               Value: 'aws-ollama-platform'
-
-  # Auto Scaling Group for EC2 instances (commented out to avoid circular dependency)
-  # AutoScalingGroup:
-  #   Type: AWS::AutoScaling::AutoScalingGroup
-  #   Properties:
-  #     AutoScalingGroupName: !Sub '${Environment}-ollama-asg'
-  #     VPCZoneIdentifier: !Ref PrivateSubnetIds
-  #     LaunchTemplate:
-  #       LaunchTemplateId: !Ref EC2LaunchTemplate
-  #       Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-  #     MinSize: 0
-  #     MaxSize: !If [IsProduction, 10, 3]
-  #     DesiredCapacity: 0
-  #     TargetGroupARNs:
-  #       - !Ref DefaultTargetGroup
-  #     HealthCheckType: ELB
-  #     HealthCheckGracePeriod: 300
-  #     DefaultCooldown: 300
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Sub '${Environment}-ollama-gpu-instance'
-  #         PropagateAtLaunch: true
-  #       - Key: Environment
-  #         Value: !Ref Environment
-  #         PropagateAtLaunch: true
-  #       - Key: Project
-  #         Value: 'aws-ollama-platform'
-  #         PropagateAtLaunch: true
-
-  # Capacity Provider for EC2 (commented out to avoid circular dependency)
-  # Will be added via separate stack or manual configuration
-  # EC2CapacityProvider:
-  #   Type: AWS::ECS::CapacityProvider
-  #   Properties:
-  #     Name: !Sub '${Environment}-ollama-ec2-capacity-provider'
-  #     AutoScalingGroupProvider:
-  #       AutoScalingGroupArn: !Ref AutoScalingGroup
-  #       ManagedScaling:
-  #         Status: ENABLED
-  #         TargetCapacity: 80
-  #         MinimumScalingStepSize: 1
-  #         MaximumScalingStepSize: 10
-  #       ManagedTerminationProtection: DISABLED
-  #     Tags:
-  #       - Key: Environment
-  #         Value: !Ref Environment
-  #       - Key: Project
-  #         Value: 'aws-ollama-platform'
-
-  # CloudWatch Alarms for monitoring
-  HighCPUAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Condition: IsProduction
+  # Cluster に Capacity Provider を関連付け（デフォルト戦略）
+  ClusterCapacityProviders:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
     Properties:
-      AlarmName: !Sub '${Environment}-ollama-high-cpu'
-      AlarmDescription: 'High CPU utilization in ECS cluster'
-      MetricName: CPUUtilization
-      Namespace: AWS/ECS
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 80
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: ClusterName
-          Value: !Ref ECSCluster
-      AlarmActions:
-        - !Ref SNSTopicAlerts
-
-  HighMemoryAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Condition: IsProduction
-    Properties:
-      AlarmName: !Sub '${Environment}-ollama-high-memory'
-      AlarmDescription: 'High memory utilization in ECS cluster'
-      MetricName: MemoryUtilization
-      Namespace: AWS/ECS
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 80
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: ClusterName
-          Value: !Ref ECSCluster
-      AlarmActions:
-        - !Ref SNSTopicAlerts
-
-  # SNS Topic for alerts
-  SNSTopicAlerts:
-    Type: AWS::SNS::Topic
-    Condition: IsProduction
-    Properties:
-      TopicName: !Sub '${Environment}-ollama-ecs-alerts'
-      DisplayName: 'AWS Ollama Platform - ECS Alerts'
-
-  # Application Auto Scaling Target for ECS Service - 無効化
-  # ECSScalableTarget:
-  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
-  #   Properties:
-  #     MaxCapacity: !If [IsProduction, 20, 5]
-  #     MinCapacity: 0
-  #     ResourceId: !Sub 'service/${ECSCluster}/placeholder'
-  #     RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
-  #     ScalableDimension: ecs:service:DesiredCount
-  #     ServiceNamespace: ecs
-
-  # Scaling Policy for Scale Up - 無効化
-  # ECSScaleUpPolicy:
-  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
-  #   Properties:
-  #     PolicyName: !Sub '${Environment}-ollama-scale-up'
-  #     PolicyType: TargetTrackingScaling
-  #     ScalingTargetId: !Ref ECSScalableTarget
-  #     TargetTrackingScalingPolicyConfiguration:
-  #       TargetValue: 70.0
-  #       PredefinedMetricSpecification:
-  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
-  #       ScaleOutCooldown: 300
-  #       ScaleInCooldown: 300
+      Cluster: !Ref ECSCluster
+      CapacityProviders:
+        - !Ref GPUCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref GPUCapacityProvider
+          Weight: 1
+          Base: 0
 
 Outputs:
   ECSClusterName:
-    Description: 'ECS Cluster name'
+    Description: 'Name of the ECS Cluster'
     Value: !Ref ECSCluster
     Export:
       Name: !Sub '${AWS::StackName}-ECSClusterName'
 
   ECSClusterArn:
-    Description: 'ECS Cluster ARN'
+    Description: 'ARN of the ECS Cluster'
     Value: !GetAtt ECSCluster.Arn
     Export:
       Name: !Sub '${AWS::StackName}-ECSClusterArn'
 
-  LoadBalancerDNS:
-    Description: 'Application Load Balancer DNS name'
+  ApplicationLoadBalancerURL:
+    Description: 'URL of the Application Load Balancer'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationLoadBalancerURL'
+
+  ApplicationLoadBalancerDNSName:
+    Description: 'DNS Name of the Application Load Balancer'
     Value: !GetAtt ApplicationLoadBalancer.DNSName
     Export:
-      Name: !Sub '${AWS::StackName}-LoadBalancerDNS'
+      Name: !Sub '${AWS::StackName}-ApplicationLoadBalancerDNSName'
 
   LoadBalancerArn:
-    Description: 'Application Load Balancer ARN'
+    Description: 'ARN of the Application Load Balancer'
     Value: !Ref ApplicationLoadBalancer
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerArn'
 
-  LoadBalancerZoneId:
-    Description: 'Application Load Balancer Hosted Zone ID'
-    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+  ALBListenerArn:
+    Description: 'ARN of the ALB Listener'
+    Value: !Ref ALBListener
     Export:
-      Name: !Sub '${AWS::StackName}-LoadBalancerZoneId'
+      Name: !Sub '${AWS::StackName}-ALBListenerArn'
 
   DefaultTargetGroupArn:
-    Description: 'Default Target Group ARN'
+    Description: 'ARN of the Default Target Group'
     Value: !Ref DefaultTargetGroup
     Export:
       Name: !Sub '${AWS::StackName}-DefaultTargetGroupArn'
 
-  OllamaTaskDefinitionArn:
-    Description: 'Ollama Task Definition ARN (CPU)'
-    Value: !Ref OllamaTaskDefinition
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaTaskDefinitionArn'
-
-  OllamaGPUTaskDefinitionArn:
-    Description: 'Ollama Task Definition ARN (GPU)'
-    Value: !Ref OllamaGPUTaskDefinition
-    Export:
-      Name: !Sub '${AWS::StackName}-OllamaGPUTaskDefinitionArn'
-
   ECSSecurityGroupId:
-    Description: 'ECS Security Group ID'
+    Description: 'Security Group ID for ECS Tasks'
     Value: !Ref ECSSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-ECSSecurityGroupId'
 
   ALBSecurityGroupId:
-    Description: 'ALB Security Group ID'
+    Description: 'Security Group ID for Application Load Balancer'
     Value: !Ref ALBSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-ALBSecurityGroupId'
 
   ECSLogGroupName:
-    Description: 'ECS CloudWatch Log Group name'
+    Description: 'Name of the CloudWatch Log Group for ECS Tasks'
     Value: !Ref ECSLogGroup
     Export:
       Name: !Sub '${AWS::StackName}-ECSLogGroupName'
+
+  # === 新規: API 層へ渡すための出力 ===
+  GpuCapacityProviderName:
+    Description: 'Capacity Provider name for GPU EC2 nodes'
+    Value: !Ref GPUCapacityProvider
+    Export:
+      Name: !Sub '${AWS::StackName}-GpuCapacityProviderName'

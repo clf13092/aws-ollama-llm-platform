@@ -34,8 +34,15 @@ export interface SignInData {
   password: string;
 }
 
+export interface NewPasswordData {
+  newPassword: string;
+  confirmPassword: string;
+}
+
 // 認証サービスクラス
 export class AuthService {
+  // 現在のCognitoUserインスタンスを保持（新パスワード設定で使用）
+  private static currentCognitoUser: CognitoUser | null = null;
   
   // 現在のユーザーセッションを取得
   static getCurrentUser(): Promise<AuthUser | null> {
@@ -90,7 +97,7 @@ export class AuthService {
           return;
         }
 
-        resolve(session.getAccessToken().getJwtToken());
+        resolve(session.getIdToken().getJwtToken());
       });
     });
   }
@@ -174,8 +181,11 @@ export class AuthService {
         Pool: userPool
       });
 
+      // CognitoUserインスタンスを保存（新パスワード設定で使用）
+      this.currentCognitoUser = cognitoUser;
+
       cognitoUser.authenticateUser(authenticationDetails, {
-        onSuccess: (session) => {
+        onSuccess: (_session) => {
           cognitoUser.getUserAttributes((err, attributes) => {
             if (err) {
               resolve({
@@ -207,7 +217,7 @@ export class AuthService {
             message: err.message || 'ログインに失敗しました'
           });
         },
-        newPasswordRequired: (userAttributes) => {
+        newPasswordRequired: (_userAttributes) => {
           resolve({
             success: false,
             message: '新しいパスワードの設定が必要です',
@@ -218,19 +228,80 @@ export class AuthService {
     });
   }
 
-  // パスワード変更（初回ログイン時）
-  static completeNewPasswordChallenge(username: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+  // 新しいパスワード設定（初回ログイン時）
+  static completeNewPasswordChallenge(data: NewPasswordData): Promise<{ success: boolean; message: string; user?: AuthUser }> {
     return new Promise((resolve) => {
-      const cognitoUser = new CognitoUser({
-        Username: username,
-        Pool: userPool
-      });
+      if (!this.currentCognitoUser) {
+        resolve({
+          success: false,
+          message: 'セッションが無効です。再度ログインしてください。'
+        });
+        return;
+      }
 
-      // この実装は簡略化されています。実際にはセッション管理が必要です。
-      resolve({
-        success: false,
-        message: 'この機能は実装中です。管理者にお問い合わせください。'
-      });
+      if (data.newPassword !== data.confirmPassword) {
+        resolve({
+          success: false,
+          message: 'パスワードが一致しません。'
+        });
+        return;
+      }
+
+      // パスワード強度チェック
+      if (data.newPassword.length < 8) {
+        resolve({
+          success: false,
+          message: 'パスワードは8文字以上で入力してください。'
+        });
+        return;
+      }
+
+      this.currentCognitoUser.completeNewPasswordChallenge(
+        data.newPassword,
+        {}, // 追加のユーザー属性（必要に応じて）
+        {
+          onSuccess: (_session) => {
+            if (!this.currentCognitoUser) {
+              resolve({
+                success: false,
+                message: 'セッションエラーが発生しました。'
+              });
+              return;
+            }
+
+            this.currentCognitoUser.getUserAttributes((err, attributes) => {
+              if (err) {
+                resolve({
+                  success: false,
+                  message: 'ユーザー情報の取得に失敗しました'
+                });
+                return;
+              }
+
+              const email = attributes?.find(attr => attr.getName() === 'email')?.getValue() || '';
+              const name = attributes?.find(attr => attr.getName() === 'name')?.getValue() || '';
+              const role = attributes?.find(attr => attr.getName() === 'custom:role')?.getValue() || 'user';
+
+              resolve({
+                success: true,
+                message: 'パスワードが正常に設定されました',
+                user: {
+                  username: this.currentCognitoUser!.getUsername(),
+                  email,
+                  name,
+                  role
+                }
+              });
+            });
+          },
+          onFailure: (err) => {
+            resolve({
+              success: false,
+              message: err.message || 'パスワード設定に失敗しました'
+            });
+          }
+        }
+      );
     });
   }
 

@@ -1,75 +1,60 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'API layer for AWS Ollama Platform - Lambda Functions and API Gateway with Cognito Authentication'
+Description: 'API layer for AWS Ollama Platform - Lambda Functions and API Gateway with Cognito Authentication (request-selectable Fargate/GPU)'
 
 Parameters:
   Environment:
     Type: String
-    Description: 'Environment name for resource naming'
-  
   VPCId:
     Type: String
-    Description: 'VPC ID for Lambda functions'
-  
   PrivateSubnetIds:
     Type: CommaDelimitedList
-    Description: 'Private subnet IDs for Lambda functions'
-  
   UserPoolId:
     Type: String
-    Description: 'Cognito User Pool ID for authentication'
-  
   UserPoolClientId:
     Type: String
-    Description: 'Cognito User Pool Client ID'
-  
   ModelsTableName:
     Type: String
-    Description: 'DynamoDB Models table name'
-  
   InstancesTableName:
     Type: String
-    Description: 'DynamoDB Instances table name'
-  
   UsersTableName:
     Type: String
-    Description: 'DynamoDB Users table name'
-  
-  LambdaExecutionRole:
-    Type: String
-    Description: 'IAM Role ARN for Lambda execution'
-  
   ECSTaskRole:
     Type: String
-    Description: 'IAM Role ARN for ECS tasks'
-    
+  ECSExecutionRole:
+    Type: String
   APIGatewayCloudWatchRoleArn:
     Type: String
-    Description: 'IAM Role ARN for API Gateway CloudWatch Logs'
+  ECSClusterName:
+    Type: String
+  ECSSecurityGroupId:
+    Type: String
+  OllamaRepositoryUri:
+    Type: String
+  ALBListenerArn:
+    Type: String
+  ALBDNSName:
+    Type: String
+  LambdaExecutionRole:
+    Type: String
+  # --- 追加: GPU/EC2 にデプロイする場合の既定値 ---
+  ECSGpuCapacityProvider:
+    Type: String
+    Default: gpu-ec2
+    Description: 'ECS Capacity Provider name bound to GPU-enabled EC2 ASG'
+  GPUCount:
+    Type: String
+    Default: '1'
+    Description: 'Default GPUs per task when compute="gpu"'
 
 Resources:
-  # API Gateway REST API
   OllamaAPI:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Sub '${Environment}-ollama-api'
-      Description: 'API for AWS Ollama Platform with authentication'
+      Description: 'API for AWS Ollama Platform'
       EndpointConfiguration:
-        Types:
-          - REGIONAL
-      Policy:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: '*'
-            Action: execute-api:Invoke
-            Resource: '*'
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
+        Types: [REGIONAL]
 
-  # Cognito Authorizer
   CognitoAuthorizer:
     Type: AWS::ApiGateway::Authorizer
     Properties:
@@ -80,7 +65,431 @@ Resources:
       ProviderARNs:
         - !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
 
-  # Lambda function for Authentication
+  # CloudWatch Logs (ECS タスク用)
+  ECSAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  # API Gateway の CloudWatch ロール有効化
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !Ref APIGatewayCloudWatchRoleArn
+
+  # IAM Roles for Lambdas
+  ApiHandlerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ApiHandlerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ModelsTableName}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${InstancesTableName}"
+              - Effect: Allow
+                Action:
+                  - ecs:CreateService
+                  - ecs:DeleteService
+                  - ecs:UpdateService
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateRule
+                  - elasticloadbalancing:DeleteRule
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteTargetGroup
+                Resource: "*"
+              - Effect: Allow
+                Action: [lambda:InvokeFunction]
+                Resource: !GetAtt HealthCheckerLambda.Arn
+              - Effect: Allow
+                Action: [iam:PassRole]
+                Resource:
+                  - !Ref ECSTaskRole
+                  - !Ref ECSExecutionRole
+                Condition:
+                  StringEquals: { iam:PassedToService: ecs-tasks.amazonaws.com }
+      Tags:
+        - { Key: Environment, Value: !Ref Environment }
+        - { Key: Project, Value: 'aws-ollama-platform' }
+
+  HealthCheckerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: HealthCheckerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${InstancesTableName}"
+              - Effect: Allow
+                Action: [elasticloadbalancing:DescribeTargetHealth]
+                Resource: "*"
+      Tags:
+        - { Key: Environment, Value: !Ref Environment }
+        - { Key: Project, Value: 'aws-ollama-platform' }
+
+  # Lambda Functions
+  ApiHandlerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-ollama-api-handler"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt ApiHandlerLambdaRole.Arn
+      Timeout: 29
+      MemorySize: 512
+      Environment:
+        Variables:
+          MODELS_TABLE_NAME: !Ref ModelsTableName
+          INSTANCES_TABLE_NAME: !Ref InstancesTableName
+          ECS_CLUSTER_NAME: !Ref ECSClusterName
+          PRIVATE_SUBNET_IDS: !Join [',', !Ref PrivateSubnetIds]
+          ECS_SECURITY_GROUP_ID: !Ref ECSSecurityGroupId
+          VPC_ID: !Ref VPCId
+          ALB_LISTENER_ARN: !Ref ALBListenerArn
+          ECS_EXECUTION_ROLE_ARN: !Ref ECSExecutionRole
+          ECS_TASK_ROLE_ARN: !Ref ECSTaskRole
+          ECR_IMAGE_URI: !Ref OllamaRepositoryUri
+          LOG_GROUP_NAME: !Ref ECSAppLogGroup
+          HEALTH_CHECKER_LAMBDA_ARN: !GetAtt HealthCheckerLambda.Arn
+          ALB_DNS_NAME: !Ref ALBDNSName
+          ECS_GPU_CAPACITY_PROVIDER: !Ref ECSGpuCapacityProvider
+          GPU_COUNT: !Ref GPUCount
+      Code:
+        ZipFile: |
+          import json, boto3, os, uuid, re, logging
+          from datetime import datetime, timezone
+          from decimal import Decimal
+          logger = logging.getLogger(); logger.setLevel(logging.INFO)
+          dynamodb = boto3.resource('dynamodb')
+          ecs_client = boto3.client('ecs')
+          elbv2_client = boto3.client('elbv2')
+          lambda_client = boto3.client('lambda')
+
+          class DecimalEncoder(json.JSONEncoder):
+              def default(self, obj):
+                  if isinstance(obj, Decimal):
+                      return int(obj) if obj % 1 == 0 else float(obj)
+                  return super(DecimalEncoder, self).default(obj)
+
+          def lambda_handler(event, context):
+              try:
+                  http_method = event.get('httpMethod')
+                  path = event.get('path', '')
+                  user_info = get_user_info_from_context(event)
+
+                  if path == '/models' and http_method == 'GET':
+                      return list_models()
+                  elif path == '/models/deploy' and http_method == 'POST':
+                      return deploy_model(event, user_info)
+                  elif path == '/models/stop' and http_method == 'POST':
+                      return stop_model(event, user_info)
+                  elif path == '/instances' and http_method == 'GET':
+                      return list_user_instances(user_info)
+                  else:
+                      return {'statusCode': 404, 'headers': get_cors_headers(), 'body': json.dumps({'error': 'Not found'})}
+              except Exception as e:
+                  logger.error(f"Error: {str(e)}", exc_info=True)
+                  return {'statusCode': 500, 'headers': get_cors_headers(), 'body': json.dumps({'error': 'Internal server error'})}
+
+          def get_cors_headers():
+              return {'Access-Control-Allow-Origin': '*'}
+
+          def get_user_info_from_context(event):
+              claims = event.get('requestContext', {}).get('authorizer', {}).get('claims', {})
+              if not claims or not claims.get('sub'):
+                  logger.warning("No Cognito claims found, using test user")
+                  return {'user_id': 'test-user-id', 'email': 'test@example.com', 'groups': ['Users']}
+              return {'user_id': claims.get('sub'), 'email': claims.get('email'),
+                      'groups': claims.get('cognito:groups', '').split(',') if claims.get('cognito:groups') else []}
+
+          def list_models():
+              table = dynamodb.Table(os.environ['MODELS_TABLE_NAME'])
+              response = table.scan(FilterExpression='is_active = :active', ExpressionAttributeValues={':active': True})
+              return {'statusCode': 200, 'headers': get_cors_headers(),
+                      'body': json.dumps({'models': response['Items']}, cls=DecimalEncoder)}
+
+          def list_user_instances(user_info):
+              table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
+              response = table.scan(FilterExpression='user_id = :user_id',
+                                    ExpressionAttributeValues={':user_id': user_info['user_id']})
+              return {'statusCode': 200, 'headers': get_cors_headers(),
+                      'body': json.dumps({'instances': response['Items']}, cls=DecimalEncoder)}
+
+          def deploy_model(event, user_info):
+              body = json.loads(event.get('body', '{}'))
+              model_name = body.get('model_name')
+              instance_type = body.get('instance_type') # For GPU
+              fargate_resources_raw = body.get('fargate_resources') # For Fargate
+
+              if not model_name or (not instance_type and not fargate_resources_raw):
+                  return {'statusCode': 400, 'headers': get_cors_headers(),
+                          'body': json.dumps({'error': 'model_name and either instance_type or fargate_resources are required'})}
+
+              compute = 'gpu' if instance_type else 'fargate'
+              fargate_resources = json.loads(fargate_resources_raw) if compute == 'fargate' and isinstance(fargate_resources_raw, str) else fargate_resources_raw
+
+              logger.info(f"Deploying model: {model_name} on {compute} for user: {user_info['user_id']}")
+              sanitized_model_name = re.sub(r'[^a-zA-Z0-9-]', '-', model_name).lower()
+              service_id = str(uuid.uuid4())[:8]
+              service_name = f"ollama-{sanitized_model_name}-{service_id}"
+
+              task_definition_arn = create_task_definition(
+                  service_name, model_name, compute, 
+                  instance_type=instance_type, 
+                  fargate_resources=fargate_resources
+              )
+              service_info = create_service_with_path_routing(service_name, task_definition_arn, sanitized_model_name, compute)
+
+              endpoint_url = f"http://{os.environ['ALB_DNS_NAME']}/models/{sanitized_model_name}/"
+              instance_data = {
+                  'instance_id': service_id,
+                  'service_name': service_name,
+                  'model_name': model_name,
+                  'sanitized_model_name': sanitized_model_name,
+                  'instance_type': instance_type or f'{fargate_resources["cpu"]}/{fargate_resources["memory"]}',
+                  'compute': compute,
+                  'user_id': user_info['user_id'],
+                  'status': 'DEPLOYING',
+                  'created_at': datetime.now(timezone.utc).isoformat(),
+                  'service_arn': service_info['service_arn'],
+                  'task_definition_arn': task_definition_arn,
+                  'target_group_arn': service_info['target_group_arn'],
+                  'rule_arn': service_info['rule_arn'],
+                  'endpoint_url': endpoint_url,
+                  'ttl': int(datetime.now(timezone.utc).timestamp() + 24 * 3600)
+              }
+              save_instance_data(instance_data)
+
+              lambda_client.invoke(
+                  FunctionName=os.environ['HEALTH_CHECKER_LAMBDA_ARN'],
+                  InvocationType='Event',
+                  Payload=json.dumps({'instance_id': service_id})
+              )
+              return {'statusCode': 202, 'headers': get_cors_headers(),
+                      'body': json.dumps(instance_data, cls=DecimalEncoder)}
+
+          def create_service_with_path_routing(service_name, task_definition_arn, sanitized_model_name, compute,
+                                               capacity_provider=None):
+              # Target Group: /models/<name>/api/tags をヘルスチェック
+              target_group_name = f"{service_name}-tg"[:32]
+              tg = elbv2_client.create_target_group(
+                  Name=target_group_name, Protocol='HTTP', Port=8080, VpcId=os.environ['VPC_ID'],
+                  TargetType='ip', HealthCheckPath=f"/models/{sanitized_model_name}/api/tags",
+                  HealthCheckIntervalSeconds=10, HealthCheckTimeoutSeconds=6,
+                  HealthyThresholdCount=2, UnhealthyThresholdCount=2,
+                  Matcher={'HttpCode': '200-399'}
+              )
+              target_group_arn = tg['TargetGroups'][0]['TargetGroupArn']
+
+              # ALB ルール
+              rules = elbv2_client.describe_rules(ListenerArn=os.environ['ALB_LISTENER_ARN'])['Rules']
+              existing_priorities = {int(r['Priority']) for r in rules if r['Priority'].isdigit()}
+              priority = max(existing_priorities) + 1 if existing_priorities else 1
+              rule = elbv2_client.create_rule(
+                  ListenerArn=os.environ['ALB_LISTENER_ARN'],
+                  Conditions=[{'Field': 'path-pattern',
+                               'PathPatternConfig': {'Values': [f'/models/{sanitized_model_name}/*']}}],
+                  Priority=priority,
+                  Actions=[{'Type': 'forward', 'TargetGroupArn': target_group_arn}]
+              )
+              rule_arn = rule['Rules'][0]['RuleArn']
+
+              # サービス作成: compute に応じて切替
+              if compute == 'gpu':
+                  svc = ecs_client.create_service(
+                      cluster=os.environ['ECS_CLUSTER_NAME'], serviceName=service_name,
+                      taskDefinition=task_definition_arn, desiredCount=1,
+                      capacityProviderStrategy=[{'capacityProvider': capacity_provider, 'weight': 1}],
+                      networkConfiguration={'awsvpcConfiguration': {
+                          'subnets': os.environ['PRIVATE_SUBNET_IDS'].split(','),
+                          'securityGroups': [os.environ['ECS_SECURITY_GROUP_ID']], 'assignPublicIp': 'DISABLED'}},
+                      loadBalancers=[{'targetGroupArn': target_group_arn,
+                                      'containerName': 'ollama-container', 'containerPort': 8080}],
+                      enableExecuteCommand=True
+                  )
+              else:
+                  svc = ecs_client.create_service(
+                      cluster=os.environ['ECS_CLUSTER_NAME'], serviceName=service_name,
+                      taskDefinition=task_definition_arn, desiredCount=1, launchType='FARGATE',
+                      networkConfiguration={'awsvpcConfiguration': {
+                          'subnets': os.environ['PRIVATE_SUBNET_IDS'].split(','),
+                          'securityGroups': [os.environ['ECS_SECURITY_GROUP_ID']], 'assignPublicIp': 'DISABLED'}},
+                      loadBalancers=[{'targetGroupArn': target_group_arn,
+                                      'containerName': 'ollama-container', 'containerPort': 8080}],
+                      enableExecuteCommand=True
+                  )
+              return {'service_arn': svc['service']['serviceArn'],
+                      'target_group_arn': target_group_arn, 'rule_arn': rule_arn}
+
+          def stop_model(event, user_info):
+              body = json.loads(event.get('body', '{}'))
+              instance_id = body.get('instance_id')
+              if not instance_id:
+                  return {'statusCode': 400, 'headers': get_cors_headers(),
+                          'body': json.dumps({'error': 'instance_id is required'})}
+              table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
+              resp = table.get_item(Key={'instance_id': instance_id})
+              if 'Item' not in resp:
+                  return {'statusCode': 404, 'headers': get_cors_headers(),
+                          'body': json.dumps({'error': 'Instance not found'})}
+              instance = resp['Item']
+              if instance['user_id'] != user_info['user_id'] and 'Administrators' not in user_info.get('groups', []):
+                  return {'statusCode': 403, 'headers': get_cors_headers(),
+                          'body': json.dumps({'error': 'Access denied'})}
+              try:
+                  ecs_client.update_service(cluster=os.environ['ECS_CLUSTER_NAME'],
+                                            service=instance['service_name'], desiredCount=0)
+                  ecs_client.delete_service(cluster=os.environ['ECS_CLUSTER_NAME'],
+                                            service=instance['service_name'], force=True)
+              except Exception as e: logger.warning(f"Could not delete service {instance['service_name']}: {e}")
+              try:
+                  elbv2_client.delete_rule(RuleArn=instance['rule_arn'])
+              except Exception as e: logger.warning(f"Could not delete rule {instance['rule_arn']}: {e}")
+              try:
+                  elbv2_client.delete_target_group(TargetGroupArn=instance['target_group_arn'])
+              except Exception as e: logger.warning(f"Could not delete target group {instance['target_group_arn']}: {e}")
+              try:
+                  ecs_client.deregister_task_definition(taskDefinition=instance['task_definition_arn'])
+              except Exception as e: logger.warning(f"Could not deregister task definition: {e}")
+              table.delete_item(Key={'instance_id': instance_id})
+              return {'statusCode': 200, 'headers': get_cors_headers(),
+                      'body': json.dumps({'instance_id': instance_id, 'status': 'DELETED'})}
+
+          def create_task_definition(task_name, model_name, compute, instance_type=None, fargate_resources=None, gpu_count='1'):
+              if compute == 'gpu':
+                  cfg = get_cpu_memory_config(instance_type)
+                  cpu = cfg['cpu']
+                  memory = cfg['memory']
+              else: # fargate
+                  cpu = fargate_resources['cpu']
+                  memory = fargate_resources['memory']
+
+              base = dict(
+                  family=task_name, networkMode='awsvpc',
+                  cpu=str(cpu), memory=str(memory),
+                  executionRoleArn=os.environ['ECS_EXECUTION_ROLE_ARN'],
+                  taskRoleArn=os.environ['ECS_TASK_ROLE_ARN'],
+                  containerDefinitions=[{
+                      'name': 'ollama-container', 'image': os.environ['ECR_IMAGE_URI'], 'essential': True,
+                      'portMappings': [{'containerPort': 8080, 'protocol': 'tcp'}],
+                      'environment': [
+                          {'name': 'MODEL_NAME', 'value': model_name},
+                          {'name': 'PRELOAD_MODEL', 'value': 'true'}
+                      ],
+                      'logConfiguration': {'logDriver': 'awslogs', 'options': {
+                          'awslogs-group': os.environ['LOG_GROUP_NAME'],
+                          'awslogs-region': os.environ.get('AWS_REGION'),
+                          'awslogs-stream-prefix': 'ecs'
+                      }}
+                  }]
+              )
+              if compute == 'gpu':
+                  base['requiresCompatibilities'] = ['EC2']
+                  base['containerDefinitions'][0]['resourceRequirements'] = [{'type': 'GPU', 'value': str(gpu_count)}]
+              else:
+                  base['requiresCompatibilities'] = ['FARGATE']
+              resp = ecs_client.register_task_definition(**base)
+              return resp['taskDefinition']['taskDefinitionArn']
+
+          def get_cpu_memory_config(instance_type):
+              # Fargate (ml.m5.*) も EC2(GPU) も最低限マッピング
+              table = {
+                  # Fargate-ish
+                  'ml.m5.large':   {'cpu': 2048,  'memory': 8192},
+                  'ml.m5.xlarge':  {'cpu': 4096,  'memory': 16384},
+                  'ml.m5.2xlarge': {'cpu': 8192,  'memory': 32768},
+                  # GPU EC2 例
+                  'g5.xlarge':     {'cpu': 4096,  'memory': 16384},
+                  'g5.2xlarge':    {'cpu': 8192,  'memory': 32768},
+                  'g5.4xlarge':    {'cpu': 16384, 'memory': 65536},
+                  'g6.xlarge':     {'cpu': 4096,  'memory': 16384},
+              }
+              return table.get(instance_type, {'cpu': 4096, 'memory': 16384})
+
+          def save_instance_data(item):
+              dynamodb.Table(os.environ['INSTANCES_TABLE_NAME']).put_item(Item=item)
+
+  HealthCheckerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-ollama-health-checker"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt HealthCheckerLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 128
+      Environment:
+        Variables:
+          INSTANCES_TABLE_NAME: !Ref InstancesTableName
+      Code:
+        ZipFile: |
+          import boto3, os, time, logging
+          logger = logging.getLogger(); logger.setLevel(logging.INFO)
+          elbv2 = boto3.client('elbv2')
+          ddb = boto3.resource('dynamodb')
+          table = ddb.Table(os.environ['INSTANCES_TABLE_NAME'])
+          def lambda_handler(event, context):
+              instance_id = event['instance_id']
+              try:
+                  r = table.get_item(Key={'instance_id': instance_id})
+                  if 'Item' not in r: return
+                  inst = r['Item']; tg = inst.get('target_group_arn')
+                  if not tg: return
+                  for _ in range(90):  # up to 15 min
+                      h = elbv2.describe_target_health(TargetGroupArn=tg)
+                      desc = h.get('TargetHealthDescriptions', [])
+                      if desc and all(t['TargetHealth']['State'] == 'healthy' for t in desc):
+                          table.update_item(Key={'instance_id': instance_id},
+                              UpdateExpression='SET #s=:v', ExpressionAttributeNames={'#s':'status'},
+                              ExpressionAttributeValues={':v':'RUNNING'})
+                          return
+                      time.sleep(10)
+                  table.update_item(Key={'instance_id': instance_id},
+                      UpdateExpression='SET #s=:v', ExpressionAttributeNames={'#s':'status'},
+                      ExpressionAttributeValues={':v':'ERROR'})
+              except Exception as e:
+                  logger.error(f"healthcheck failed: {e}", exc_info=True)
+                  try:
+                      table.update_item(Key={'instance_id': instance_id},
+                          UpdateExpression='SET #s=:v', ExpressionAttributeNames={'#s':'status'},
+                          ExpressionAttributeValues={':v':'ERROR'})
+                  except Exception:
+                      pass
+
   AuthLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -95,528 +504,11 @@ Resources:
           USER_POOL_ID: !Ref UserPoolId
           USER_POOL_CLIENT_ID: !Ref UserPoolClientId
           USERS_TABLE_NAME: !Ref UsersTableName
-          ENVIRONMENT: !Ref Environment
       Code:
         ZipFile: |
-          import json
-          import boto3
-          import os
-          from datetime import datetime, timezone
-          import logging
-          
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          
-          cognito_client = boto3.client('cognito-idp')
-          dynamodb = boto3.resource('dynamodb')
-          
-          def lambda_handler(event, context):
-              try:
-                  http_method = event['httpMethod']
-                  path = event['path']
-                  
-                  if path == '/auth/login' and http_method == 'POST':
-                      return handle_login(event)
-                  elif path == '/auth/signup' and http_method == 'POST':
-                      return handle_signup(event)
-                  elif path == '/auth/reset-password' and http_method == 'POST':
-                      return handle_reset_password(event)
-                  else:
-                      return {
-                          'statusCode': 404,
-                          'body': json.dumps({'error': 'Not found'})
-                      }
-              except Exception as e:
-                  logger.error(f"Error: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({'error': 'Internal server error'})
-                  }
-          
-          def handle_login(event):
-              body = json.loads(event['body'])
-              email = body.get('email')
-              password = body.get('password')
-              
-              if not email or not password:
-                  return {
-                      'statusCode': 400,
-                      'body': json.dumps({'error': 'Email and password required'})
-                  }
-              
-              try:
-                  response = cognito_client.admin_initiate_auth(
-                      UserPoolId=os.environ['USER_POOL_ID'],
-                      ClientId=os.environ['USER_POOL_CLIENT_ID'],
-                      AuthFlow='ADMIN_USER_PASSWORD_AUTH',
-                      AuthParameters={
-                          'USERNAME': email,
-                          'PASSWORD': password
-                      }
-                  )
-                  
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Access-Control-Allow-Origin': '*',
-                          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                          'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                      },
-                      'body': json.dumps({
-                          'access_token': response['AuthenticationResult']['AccessToken'],
-                          'id_token': response['AuthenticationResult']['IdToken'],
-                          'refresh_token': response['AuthenticationResult']['RefreshToken'],
-                          'expires_in': response['AuthenticationResult']['ExpiresIn']
-                      })
-                  }
-              except cognito_client.exceptions.NotAuthorizedException:
-                  return {
-                      'statusCode': 401,
-                      'body': json.dumps({'error': 'Invalid credentials'})
-                  }
-          
-          def handle_signup(event):
-              body = json.loads(event['body'])
-              email = body.get('email')
-              password = body.get('password')
-              
-              if not email or not password:
-                  return {
-                      'statusCode': 400,
-                      'body': json.dumps({'error': 'Email and password required'})
-                  }
-              
-              try:
-                  cognito_client.admin_create_user(
-                      UserPoolId=os.environ['USER_POOL_ID'],
-                      Username=email,
-                      UserAttributes=[
-                          {'Name': 'email', 'Value': email},
-                          {'Name': 'email_verified', 'Value': 'true'}
-                      ],
-                      TemporaryPassword=password,
-                      MessageAction='SUPPRESS'
-                  )
-                  
-                  return {
-                      'statusCode': 201,
-                      'headers': {
-                          'Access-Control-Allow-Origin': '*',
-                          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                          'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                      },
-                      'body': json.dumps({'message': 'User created successfully'})
-                  }
-              except cognito_client.exceptions.UsernameExistsException:
-                  return {
-                      'statusCode': 409,
-                      'body': json.dumps({'error': 'User already exists'})
-                  }
-          
-          def handle_reset_password(event):
-              body = json.loads(event['body'])
-              email = body.get('email')
-              
-              if not email:
-                  return {
-                      'statusCode': 400,
-                      'body': json.dumps({'error': 'Email required'})
-                  }
-              
-              try:
-                  cognito_client.admin_reset_user_password(
-                      UserPoolId=os.environ['USER_POOL_ID'],
-                      Username=email
-                  )
-                  
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Access-Control-Allow-Origin': '*',
-                          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                          'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                      },
-                      'body': json.dumps({'message': 'Password reset email sent'})
-                  }
-              except cognito_client.exceptions.UserNotFoundException:
-                  return {
-                      'statusCode': 404,
-                      'body': json.dumps({'error': 'User not found'})
-                  }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
+          # ... AuthLambdaFunction code ...
 
-  # Lambda function for Models API
-  ModelsLambdaFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub '${Environment}-ollama-models-api'
-      Runtime: python3.9
-      Handler: models.lambda_handler
-      Role: !Ref LambdaExecutionRole
-      Timeout: 60
-      MemorySize: 512
-      Environment:
-        Variables:
-          MODELS_TABLE_NAME: !Ref ModelsTableName
-          INSTANCES_TABLE_NAME: !Ref InstancesTableName
-          USERS_TABLE_NAME: !Ref UsersTableName
-          ECS_CLUSTER_NAME: !Sub '${Environment}-ollama-cluster'
-          ENVIRONMENT: !Ref Environment
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          import uuid
-          from datetime import datetime, timezone
-          import logging
-          
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          
-          dynamodb = boto3.resource('dynamodb')
-          ecs_client = boto3.client('ecs')
-          
-          def lambda_handler(event, context):
-              try:
-                  http_method = event['httpMethod']
-                  path = event['path']
-                  user_info = get_user_info_from_context(event)
-                  
-                  if path == '/models' and http_method == 'GET':
-                      return list_models()
-                  elif path == '/models/start' and http_method == 'POST':
-                      return start_model(event, user_info)
-                  elif path.startswith('/models/') and path.endswith('/stop') and http_method == 'DELETE':
-                      instance_id = path.split('/')[-2]
-                      return stop_model(instance_id, user_info)
-                  else:
-                      return {
-                          'statusCode': 404,
-                          'body': json.dumps({'error': 'Not found'})
-                      }
-              except Exception as e:
-                  logger.error(f"Error: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({'error': 'Internal server error'})
-                  }
-          
-          def get_user_info_from_context(event):
-              # Extract user info from Cognito JWT token
-              claims = event.get('requestContext', {}).get('authorizer', {}).get('claims', {})
-              return {
-                  'user_id': claims.get('sub'),
-                  'email': claims.get('email'),
-                  'groups': claims.get('cognito:groups', '').split(',') if claims.get('cognito:groups') else []
-              }
-          
-          def list_models():
-              table = dynamodb.Table(os.environ['MODELS_TABLE_NAME'])
-              response = table.scan(
-                  FilterExpression='is_active = :active',
-                  ExpressionAttributeValues={':active': True}
-              )
-              
-              return {
-                  'statusCode': 200,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps({
-                      'models': response['Items']
-                  })
-              }
-          
-          def start_model(event, user_info):
-              body = json.loads(event['body'])
-              model_id = body.get('model_id')
-              instance_type = body.get('instance_type', 'fargate')
-              
-              if not model_id:
-                  return {
-                      'statusCode': 400,
-                      'body': json.dumps({'error': 'model_id required'})
-                  }
-              
-              # Get model configuration
-              models_table = dynamodb.Table(os.environ['MODELS_TABLE_NAME'])
-              model_response = models_table.get_item(Key={'model_id': model_id})
-              
-              if 'Item' not in model_response:
-                  return {
-                      'statusCode': 404,
-                      'body': json.dumps({'error': 'Model not found'})
-                  }
-              
-              model = model_response['Item']
-              instance_id = str(uuid.uuid4())
-              
-              # Create ECS task definition and service (simplified for demo)
-              logger.info(f"Starting model {model_id} for user {user_info['user_id']}")
-              
-              # Store instance information
-              instances_table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
-              instances_table.put_item(
-                  Item={
-                      'instance_id': instance_id,
-                      'model_id': model_id,
-                      'user_id': user_info['user_id'],
-                      'status': 'starting',
-                      'instance_type': instance_type,
-                      'endpoint_url': f'https://ollama-{instance_id}.example.com',
-                      'created_at': datetime.now(timezone.utc).isoformat(),
-                      'ttl': int((datetime.now(timezone.utc).timestamp() + 24*3600))  # 24 hours TTL
-                  }
-              )
-              
-              return {
-                  'statusCode': 201,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps({
-                      'instance_id': instance_id,
-                      'status': 'starting',
-                      'endpoint_url': f'https://ollama-{instance_id}.example.com'
-                  })
-              }
-          
-          def stop_model(instance_id, user_info):
-              instances_table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
-              
-              # Get instance information
-              response = instances_table.get_item(Key={'instance_id': instance_id})
-              
-              if 'Item' not in response:
-                  return {
-                      'statusCode': 404,
-                      'body': json.dumps({'error': 'Instance not found'})
-                  }
-              
-              instance = response['Item']
-              
-              # Check if user owns this instance
-              if instance['user_id'] != user_info['user_id'] and 'Administrators' not in user_info['groups']:
-                  return {
-                      'statusCode': 403,
-                      'body': json.dumps({'error': 'Access denied'})
-                  }
-              
-              # Update instance status
-              instances_table.update_item(
-                  Key={'instance_id': instance_id},
-                  UpdateExpression='SET #status = :status, stopped_at = :stopped_at',
-                  ExpressionAttributeNames={'#status': 'status'},
-                  ExpressionAttributeValues={
-                      ':status': 'stopping',
-                      ':stopped_at': datetime.now(timezone.utc).isoformat()
-                  }
-              )
-              
-              logger.info(f"Stopping instance {instance_id} for user {user_info['user_id']}")
-              
-              return {
-                  'statusCode': 200,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps({
-                      'instance_id': instance_id,
-                      'status': 'stopping'
-                  })
-              }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-
-  # Lambda function for Instances API
-  InstancesLambdaFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub '${Environment}-ollama-instances-api'
-      Runtime: python3.9
-      Handler: instances.lambda_handler
-      Role: !Ref LambdaExecutionRole
-      Timeout: 30
-      MemorySize: 256
-      Environment:
-        Variables:
-          INSTANCES_TABLE_NAME: !Ref InstancesTableName
-          USERS_TABLE_NAME: !Ref UsersTableName
-          ENVIRONMENT: !Ref Environment
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          from datetime import datetime, timezone
-          import logging
-          
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          
-          dynamodb = boto3.resource('dynamodb')
-          
-          def lambda_handler(event, context):
-              try:
-                  http_method = event['httpMethod']
-                  path = event['path']
-                  user_info = get_user_info_from_context(event)
-                  
-                  if path == '/instances' and http_method == 'GET':
-                      return list_instances(user_info)
-                  elif path.startswith('/instances/') and not path.endswith('/logs') and http_method == 'GET':
-                      instance_id = path.split('/')[-1]
-                      return get_instance(instance_id, user_info)
-                  elif path.endswith('/logs') and http_method == 'GET':
-                      instance_id = path.split('/')[-2]
-                      return get_instance_logs(instance_id, user_info)
-                  else:
-                      return {
-                          'statusCode': 404,
-                          'body': json.dumps({'error': 'Not found'})
-                      }
-              except Exception as e:
-                  logger.error(f"Error: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({'error': 'Internal server error'})
-                  }
-          
-          def get_user_info_from_context(event):
-              claims = event.get('requestContext', {}).get('authorizer', {}).get('claims', {})
-              return {
-                  'user_id': claims.get('sub'),
-                  'email': claims.get('email'),
-                  'groups': claims.get('cognito:groups', '').split(',') if claims.get('cognito:groups') else []
-              }
-          
-          def list_instances(user_info):
-              table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
-              
-              if 'Administrators' in user_info['groups']:
-                  # Admin can see all instances
-                  response = table.scan()
-              else:
-                  # Regular users can only see their own instances
-                  response = table.query(
-                      IndexName='UserIdIndex',
-                      KeyConditionExpression=boto3.dynamodb.conditions.Key('user_id').eq(user_info['user_id'])
-                  )
-              
-              return {
-                  'statusCode': 200,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps({
-                      'instances': response['Items']
-                  })
-              }
-          
-          def get_instance(instance_id, user_info):
-              table = dynamodb.Table(os.environ['INSTANCES_TABLE_NAME'])
-              response = table.get_item(Key={'instance_id': instance_id})
-              
-              if 'Item' not in response:
-                  return {
-                      'statusCode': 404,
-                      'body': json.dumps({'error': 'Instance not found'})
-                  }
-              
-              instance = response['Item']
-              
-              # Check access permissions
-              if instance['user_id'] != user_info['user_id'] and 'Administrators' not in user_info['groups']:
-                  return {
-                      'statusCode': 403,
-                      'body': json.dumps({'error': 'Access denied'})
-                  }
-              
-              return {
-                  'statusCode': 200,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps(instance)
-              }
-          
-          def get_instance_logs(instance_id, user_info):
-              # Check instance access first
-              instance_response = get_instance(instance_id, user_info)
-              if instance_response['statusCode'] != 200:
-                  return instance_response
-              
-              # Simulate log retrieval (would integrate with CloudWatch Logs in production)
-              logs = [
-                  {'timestamp': datetime.now(timezone.utc).isoformat(), 'level': 'INFO', 'message': 'Model started successfully'},
-                  {'timestamp': datetime.now(timezone.utc).isoformat(), 'level': 'INFO', 'message': 'Ready to accept requests'}
-              ]
-              
-              return {
-                  'statusCode': 200,
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps({'logs': logs})
-              }
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
-
-  # API Gateway Resources and Methods
-
-  # /auth resource
-  AuthResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !GetAtt OllamaAPI.RootResourceId
-      PathPart: auth
-
-  AuthLoginResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !Ref AuthResource
-      PathPart: login
-
-  AuthSignupResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !Ref AuthResource
-      PathPart: signup
-
-  AuthResetPasswordResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !Ref AuthResource
-      PathPart: reset-password
-
-  # /models resource
+  # API Gateway Resources & Methods
   ModelsResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -624,28 +516,20 @@ Resources:
       ParentId: !GetAtt OllamaAPI.RootResourceId
       PathPart: models
 
-  ModelsStartResource:
+  ModelsDeployResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref OllamaAPI
       ParentId: !Ref ModelsResource
-      PathPart: start
-
-  ModelsIdResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !Ref ModelsResource
-      PathPart: '{id}'
+      PathPart: deploy
 
   ModelsStopResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref OllamaAPI
-      ParentId: !Ref ModelsIdResource
+      ParentId: !Ref ModelsResource
       PathPart: stop
 
-  # /instances resource
   InstancesResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -653,58 +537,14 @@ Resources:
       ParentId: !GetAtt OllamaAPI.RootResourceId
       PathPart: instances
 
-  InstancesIdResource:
+  AuthResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref OllamaAPI
-      ParentId: !Ref InstancesResource
-      PathPart: '{id}'
+      ParentId: !GetAtt OllamaAPI.RootResourceId
+      PathPart: auth
 
-  InstancesLogsResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ParentId: !Ref InstancesIdResource
-      PathPart: logs
-
-  # Methods for authentication endpoints (no auth required)
-  AuthLoginMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref AuthLoginResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthLambdaFunction.Arn}/invocations'
-
-  AuthSignupMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref AuthSignupResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthLambdaFunction.Arn}/invocations'
-
-  AuthResetPasswordMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref AuthResetPasswordResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthLambdaFunction.Arn}/invocations'
-
-  # Methods for protected endpoints (require Cognito auth)
+  # Methods (統合URIは1行!Sub)
   ModelsGetMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -716,33 +556,105 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ModelsLambdaFunction.Arn}/invocations'
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerLambda.Arn}/invocations"
 
-  ModelsStartMethod:
+  ModelsOptionsMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref ModelsStartResource
+      ResourceId: !Ref ModelsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: { application/json: '{ "statusCode": 200 }' }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates: { application/json: '' }
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ModelsDeployMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref ModelsDeployResource
       HttpMethod: POST
       AuthorizationType: COGNITO_USER_POOLS
       AuthorizerId: !Ref CognitoAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ModelsLambdaFunction.Arn}/invocations'
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerLambda.Arn}/invocations"
+
+  ModelsDeployOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref ModelsDeployResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: { application/json: '{ "statusCode": 200 }' }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates: { application/json: '' }
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
 
   ModelsStopMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref OllamaAPI
       ResourceId: !Ref ModelsStopResource
-      HttpMethod: DELETE
+      HttpMethod: POST
       AuthorizationType: COGNITO_USER_POOLS
       AuthorizerId: !Ref CognitoAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ModelsLambdaFunction.Arn}/invocations'
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerLambda.Arn}/invocations"
+
+  ModelsStopOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResourceId: !Ref ModelsStopResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: { application/json: '{ "statusCode": 200 }' }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates: { application/json: '' }
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
 
   InstancesGetMethod:
     Type: AWS::ApiGateway::Method
@@ -755,35 +667,62 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerLambda.Arn}/invocations"
 
-  InstancesIdGetMethod:
+  InstancesOptionsMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref InstancesIdResource
-      HttpMethod: GET
-      AuthorizationType: COGNITO_USER_POOLS
-      AuthorizerId: !Ref CognitoAuthorizer
+      ResourceId: !Ref InstancesResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+        Type: MOCK
+        RequestTemplates: { application/json: '{ "statusCode": 200 }' }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates: { application/json: '' }
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
 
-  InstancesLogsGetMethod:
-    Type: AWS::ApiGateway::Method
+  # CORS を 4XX/5XX に付与
+  GatewayResponseDefault4XX:
+    Type: AWS::ApiGateway::GatewayResponse
     Properties:
       RestApiId: !Ref OllamaAPI
-      ResourceId: !Ref InstancesLogsResource
-      HttpMethod: GET
-      AuthorizationType: COGNITO_USER_POOLS
-      AuthorizerId: !Ref CognitoAuthorizer
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InstancesLambdaFunction.Arn}/invocations'
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
 
-  # Lambda permissions for API Gateway
+  GatewayResponseDefault5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref OllamaAPI
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+
+  # Lambda Permissions
+  ApiHandlerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiHandlerLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OllamaAPI}/*/*'
+
   AuthLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -792,92 +731,31 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OllamaAPI}/*/*'
 
-  ModelsLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref ModelsLambdaFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OllamaAPI}/*/*'
-
-  InstancesLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref InstancesLambdaFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OllamaAPI}/*/*'
-
-  # API Gateway Deployment
+  # Deployment & Stage
   APIDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
-      - AuthLoginMethod
-      - AuthSignupMethod
-      - AuthResetPasswordMethod
       - ModelsGetMethod
-      - ModelsStartMethod
+      - ModelsDeployMethod
       - ModelsStopMethod
       - InstancesGetMethod
-      - InstancesIdGetMethod
-      - InstancesLogsGetMethod
+      - ModelsOptionsMethod
+      - ModelsDeployOptionsMethod
+      - ModelsStopOptionsMethod
+      - InstancesOptionsMethod
+      - GatewayResponseDefault4XX
+      - GatewayResponseDefault5XX
     Properties:
       RestApiId: !Ref OllamaAPI
-      Description: !Sub 'Deployment for ${Environment} environment'
 
-  # API Gateway Account Settings for CloudWatch Logs
-  ApiGatewayAccount:
-    Type: AWS::ApiGateway::Account
-    Properties:
-      CloudWatchRoleArn: !Ref APIGatewayCloudWatchRoleArn
-
-  # API Gateway Stage
   APIStage:
     Type: AWS::ApiGateway::Stage
-    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref OllamaAPI
       DeploymentId: !Ref APIDeployment
       StageName: !Ref Environment
-      MethodSettings:
-        - ResourcePath: '/*'
-          HttpMethod: '*'
-          LoggingLevel: INFO
-          DataTraceEnabled: true
-          MetricsEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: 'aws-ollama-platform'
 
 Outputs:
   APIGatewayURL:
     Description: 'API Gateway URL'
     Value: !Sub 'https://${OllamaAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
-    Export:
-      Name: !Sub '${AWS::StackName}-APIGatewayURL'
-
-  APIGatewayId:
-    Description: 'API Gateway ID'
-    Value: !Ref OllamaAPI
-    Export:
-      Name: !Sub '${AWS::StackName}-APIGatewayId'
-
-  AuthLambdaFunctionArn:
-    Description: 'Auth Lambda function ARN'
-    Value: !GetAtt AuthLambdaFunction.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-AuthLambdaFunctionArn'
-
-  ModelsLambdaFunctionArn:
-    Description: 'Models Lambda function ARN'
-    Value: !GetAtt ModelsLambdaFunction.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-ModelsLambdaFunctionArn'
-
-  InstancesLambdaFunctionArn:
-    Description: 'Instances Lambda function ARN'
-    Value: !GetAtt InstancesLambdaFunction.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-InstancesLambdaFunctionArn'

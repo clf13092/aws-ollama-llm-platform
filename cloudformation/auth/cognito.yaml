@@ -125,14 +125,15 @@ Resources:
       PreventUserExistenceErrors: ENABLED
       EnableTokenRevocation: true
 
-  # User Pool Client for API Access (with client secret)
+  # User Pool Client for API Access (without client secret)
   UserPoolClientAPI:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       UserPoolId: !Ref UserPool
       ClientName: !Sub '${Environment}-ollama-api-client'
-      GenerateSecret: true
+      GenerateSecret: false
       ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_ADMIN_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       SupportedIdentityProviders:
@@ -407,7 +408,19 @@ Resources:
                               TemporaryPassword=temporary_password,
                               MessageAction='SUPPRESS'
                           )
-                          print(f"User {user_name} created successfully.")
+                          
+                          # Add user to Admin group
+                          try:
+                              cognito_client.admin_add_user_to_group(
+                                  UserPoolId=user_pool_id,
+                                  Username=user_name,
+                                  GroupName='Administrators'
+                              )
+                              print(f"User {user_name} added to Administrators group.")
+                          except Exception as e:
+                              print(f"Warning: Could not add user to group: {str(e)}")
+                          
+                          print(f"User {user_name} created successfully with temporary password.")
 
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "CustomResourcePhysicalId")
               except Exception as e:
@@ -435,6 +448,7 @@ Resources:
                 Action:
                   - cognito-idp:AdminCreateUser
                   - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminAddUserToGroup
                 Resource: !GetAtt UserPool.Arn
 
   AdminUserCustomResource:

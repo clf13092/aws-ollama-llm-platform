@@ -56,6 +56,8 @@ Resources:
                   - ecs:RegisterTaskDefinition
                   - ecs:DeregisterTaskDefinition
                   - ecs:DescribeClusters
+                  - ecs:TagResource
+                  - ecs:UntagResource
                 Resource: '*'
                 Condition:
                   StringEquals:
@@ -75,6 +77,8 @@ Resources:
                   - elasticloadbalancing:DeleteRule
                   - elasticloadbalancing:DescribeRules
                   - elasticloadbalancing:ModifyRule
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeLoadBalancers
                 Resource: '*'
         - PolicyName: PassRoleToECS
           PolicyDocument:
