@@ -1,92 +1,56 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "🚀 Starting AWS Ollama Platform Container (Dynamic Model Support)"
-echo "Instance ID: ${INSTANCE_ID:-unknown}"
-echo "User ID: ${USER_ID:-unknown}"
-echo "Model Name: ${MODEL_NAME:-none}"
-echo "Preload Model: ${PRELOAD_MODEL:-false}"
+log() { echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')] $*"; }
 
-# Ollamaサーバーをバックグラウンドで起動
-echo "📡 Starting Ollama server..."
+# ===== 1) Ollama 起動 =====
+log "Starting Ollama on ${OLLAMA_HOST:-0.0.0.0:11434} ..."
 ollama serve &
 OLLAMA_PID=$!
 
-# サーバーが起動するまで待機
-echo "⏳ Waiting for Ollama server to start..."
-for i in {1..30}; do
-    if curl -f http://localhost:11434/api/tags >/dev/null 2>&1; then
-        echo "✅ Ollama server is ready!"
-        break
-    fi
-    echo "   Attempt $i/30: Server not ready yet..."
-    sleep 2
+# 起動待ち
+for i in {1..60}; do
+  if curl -fsS "http://127.0.0.1:11434/" >/dev/null 2>&1; then
+    log "Ollama is up."
+    break
+  fi
+  sleep 1
+  if [[ $i -eq 60 ]]; then
+    log "Ollama failed to start."
+    exit 1
+  fi
 done
 
-# サーバーが起動しなかった場合はエラー
-if ! curl -f http://localhost:11434/api/tags >/dev/null 2>&1; then
-    echo "❌ Failed to start Ollama server"
-    exit 1
+# ===== 2) モデルプリロード等（任意） =====
+# 環境変数:
+#   MODEL_NAME       : 例 "qwen2.5:1.5b"
+#   PRELOAD_MODEL    : "true" で pull/warmup 実行
+#   WARMUP_PROMPT    : 任意のウォームアッププロンプト（未指定なら簡易プロンプト）
+if [[ "${PRELOAD_MODEL:-}" == "true" || "${PRELOAD_MODEL:-}" == "1" ]]; then
+  /app/model-manager.sh "${MODEL_NAME:-}" "${WARMUP_PROMPT:-}" || true
 fi
 
-# 動的モデル管理
-if [ -n "$MODEL_NAME" ] && [ "$MODEL_NAME" != "none" ]; then
-    echo "🤖 Managing model: $MODEL_NAME"
-    
-    # モデル管理スクリプトを実行
-    if /app/model-manager.sh "$MODEL_NAME" "$PRELOAD_MODEL"; then
-        echo "✅ Model management completed successfully"
-    else
-        echo "❌ Model management failed"
-        echo "⚠️  Container will continue running, but model may not be available"
-    fi
-else
-    echo "ℹ️  No specific model requested, Ollama server ready for dynamic model loading"
-fi
+# ===== 3) Nginx (リバースプロキシ) 起動 =====
+log "Starting Nginx reverse proxy on :8080 (rewrite /models/<x>/api/* -> /api/*)"
+nginx -g 'daemon off;' &
+NGINX_PID=$!
 
-# 利用可能なモデルを表示
-echo "📋 Available models:"
-ollama list || echo "   No models available yet"
-
-# システム情報を表示
-echo "💻 System Information:"
-echo "   CPU cores: $(nproc)"
-echo "   Memory: $(free -h | awk '/^Mem:/ {print $2}')"
-echo "   Disk space: $(df -h / | awk 'NR==2 {print $4}')"
-
-# GPU情報（利用可能な場合）
-if command -v nvidia-smi >/dev/null 2>&1; then
-    echo "🎮 GPU Information:"
-    nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits | \
-        awk -F', ' '{printf "   GPU: %s, Memory: %s/%s MB\n", $1, $3, $2}'
-fi
-
-echo "🎉 Container initialization completed!"
-echo "🌐 Ollama API is available at http://0.0.0.0:11434"
-
-# 動的モデル情報の表示
-if [ -n "$MODEL_NAME" ] && [ "$MODEL_NAME" != "none" ]; then
-    echo "🔗 Model-specific endpoint ready for: $MODEL_NAME"
-    echo "📝 Example API call:"
-    echo "   curl -X POST http://localhost:11434/api/generate \\"
-    echo "        -H 'Content-Type: application/json' \\"
-    echo "        -d '{\"model\":\"$MODEL_NAME\",\"prompt\":\"Hello\",\"stream\":false}'"
-fi
-
-# シグナルハンドリング
+# ===== シグナル処理 =====
 cleanup() {
-    echo "🛑 Received shutdown signal"
-    if [ -n "$OLLAMA_PID" ]; then
-        echo "   Stopping Ollama server (PID: $OLLAMA_PID)..."
-        kill -TERM "$OLLAMA_PID" 2>/dev/null || true
-        wait "$OLLAMA_PID" 2>/dev/null || true
-    fi
-    echo "✅ Cleanup completed"
-    exit 0
+  log "Shutting down ..."
+  if kill -0 "$NGINX_PID" >/dev/null 2>&1; then
+    kill -TERM "$NGINX_PID" || true
+  fi
+  if kill -0 "$OLLAMA_PID" >/dev/null 2>&1; then
+    kill -TERM "$OLLAMA_PID" || true
+  fi
+  wait "$NGINX_PID" 2>/dev/null || true
+  wait "$OLLAMA_PID" 2>/dev/null || true
 }
-
 trap cleanup SIGTERM SIGINT
 
-# フォアグラウンドでOllamaサーバーを継続実行
-echo "🔄 Running in foreground mode..."
-wait "$OLLAMA_PID"
+# どちらかが落ちたら終了
+wait -n "$NGINX_PID" "$OLLAMA_PID"
+EXIT_CODE=$?
+cleanup
+exit $EXIT_CODE

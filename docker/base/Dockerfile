@@ -1,72 +1,56 @@
-# Universal Ollama Docker Image for AWS ECS
-FROM ubuntu:22.04
+# =========================
+#   Build-time base switch
+# =========================
+ARG BASE=cpu
 
-# メタデータ
-LABEL maintainer="AWS Ollama Platform"
-LABEL version="2.0"
-LABEL description="Universal Ollama image for dynamic model deployment"
+# ---- GPU base (CUDA runtime) ----
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS gpu-base
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-# 環境変数
+# ---- CPU base ----
+FROM debian:bookworm-slim AS cpu-base
+
+# ---- Select base by ARG ----
+FROM ${BASE}-base AS final
+
+# Locale/apt
 ENV DEBIAN_FRONTEND=noninteractive
-ENV OLLAMA_HOST=0.0.0.0
-ENV OLLAMA_ORIGINS=*
-ENV OLLAMA_KEEP_ALIVE=24h
-ENV OLLAMA_MAX_LOADED_MODELS=1
-ENV OLLAMA_NUM_PARALLEL=1
-ENV OLLAMA_MAX_QUEUE=512
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg tini nginx jq dumb-init \
+  && rm -rf /var/lib/apt/lists/*
 
-# 動的設定用環境変数（ECSタスクで設定される）
-ENV MODEL_NAME=""
-ENV PRELOAD_MODEL="false"
-ENV INSTANCE_ID=""
-ENV USER_ID=""
-
-# 必要なパッケージをインストール
-RUN apt-get update && apt-get install -y \
-    curl \
-    wget \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    jq \
-    htop \
-    vim \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Ollamaをインストール
+# ---------------------------
+# Install Ollama (Linux x86_64)
+# ※ 公式インストーラを利用。ネットワーク閉域の場合は社内ミラーへ置換。
+# ---------------------------
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
-# 作業ディレクトリを作成
+# 作業ディレクトリ
 WORKDIR /app
 
-# 動的モデル管理スクリプト
-COPY model-manager.sh /app/model-manager.sh
-RUN chmod +x /app/model-manager.sh
-
-# ヘルスチェック用スクリプト
-COPY healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/healthcheck.sh
-
-# 起動スクリプト（動的モデル対応）
+# スクリプト＆設定反映
+# （あなたのリポジトリのファイルをコンテナへコピー）
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+COPY healthcheck.sh /app/healthcheck.sh
+COPY model-manager.sh /app/model-manager.sh
+COPY nginx.conf /etc/nginx/nginx.conf
 
-# Ollamaユーザーを作成
-RUN useradd -m -s /bin/bash ollama && \
-    mkdir -p /home/ollama/.ollama && \
-    chown -R ollama:ollama /home/ollama && \
-    chown -R ollama:ollama /app
+# 権限
+RUN chmod +x /app/*.sh
 
-# ポート公開
-EXPOSE 11434
+# Nginx 前面、Ollama 背面
+ENV OLLAMA_HOST=0.0.0.0:11434
 
-# ヘルスチェック（動的モデル対応）
-HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=3 \
-    CMD /app/healthcheck.sh
+# 8080: Nginx (ALB → ここへ)
+EXPOSE 8080
 
-# 非rootユーザーで実行
-USER ollama
+# ヘルスチェック（Nginx 経由で /api/tags を確認）
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD /app/healthcheck.sh
 
-# エントリーポイント
-ENTRYPOINT ["/app/entrypoint.sh"]
+# PID 1 を init で置換（ゾンビ回収）
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+# エントリポイント（Ollama → Nginx の順で起動）
+CMD ["/app/entrypoint.sh"]

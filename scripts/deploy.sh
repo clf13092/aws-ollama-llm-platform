@@ -1,30 +1,32 @@
 #!/bin/bash
 
-# Main deployment script for the AWS Ollama Platform
-# This script handles ECR CloudFormation deployment, Docker image build/push, infrastructure deployment, and frontend upload.
+# AWS Ollama プラットフォーム メインデプロイスクリプト
+# このスクリプトは Docker イメージのビルド/プッシュ、インフラストラクチャのデプロイ、フロントエンドのアップロードを処理します。
 
-set -e # Exit immediately if a command exits with a non-zero status.
+set -e # コマンドがゼロ以外のステータスで終了した場合、即座に終了
 
-# --- Configuration ---
+# このスクリプトのディレクトリを取得してパスが正しいことを確認
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+
+# --- 設定 ---
 STACK_NAME="aws-ollama-platform"
-ECR_STACK_NAME="aws-ollama-platform-ecr"
-FRONTEND_DIR="frontend"
+FRONTEND_DIR="$PROJECT_ROOT/frontend"
 MAIN_TEMPLATE="cloudformation/main.yaml"
-ECR_TEMPLATE="cloudformation/storage/ecr.yaml"
-PACKAGED_TEMPLATE="cloudformation/packaged.yaml"
+PACKAGED_TEMPLATE="packaged.yaml"
 PARAMETERS_FILE="parameters.json"
 AWS_REGION=$(aws configure get region)
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-S3_BUCKET_FOR_ARTIFACTS="aws-ollama-platform-artifacts"
+S3_BUCKET_FOR_ARTIFACTS="aws-ollama-platform-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
 ENVIRONMENT="production"
 
-# --- Functions ---
+# --- 関数 ---
 
-# Function to print colored output
+# カラー出力を印刷する関数
 print_color() {
     COLOR=$1
     MESSAGE=$2
-    NC='\033[0m' # No Color
+    NC='\033[0m' # カラーなし
     case $COLOR in
         "green") echo -e "\033[0;32m${MESSAGE}${NC}" ;;
         "blue")  echo -e "\033[0;34m${MESSAGE}${NC}" ;;
@@ -34,799 +36,269 @@ print_color() {
     esac
 }
 
-# Function to get CloudFormation stack output
+# CloudFormationスタックから特定の出力値を取得する関数
 get_stack_output() {
     local stack_name=$1
     local output_key=$2
+    
     aws cloudformation describe-stacks \
         --stack-name "$stack_name" \
         --query "Stacks[0].Outputs[?OutputKey=='$output_key'].OutputValue" \
-        --output text 2>/dev/null || echo ""
+        --output text 2>/dev/null
 }
 
-# Function to deploy ECR stack
-deploy_ecr_stack() {
-    print_color "blue" "🏗️  Deploying ECR repositories with CloudFormation..."
-    
-    # ECRスタックの存在確認
-    if aws cloudformation describe-stacks --stack-name "$ECR_STACK_NAME" >/dev/null 2>&1; then
-        STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$ECR_STACK_NAME" --query "Stacks[0].StackStatus" --output text)
-        print_color "blue" "ECR Stack $ECR_STACK_NAME exists with status: $STACK_STATUS"
-        
-        case "$STACK_STATUS" in
-            "CREATE_COMPLETE"|"UPDATE_COMPLETE")
-                print_color "green" "ECR stack is ready."
-                ;;
-            "CREATE_IN_PROGRESS"|"UPDATE_IN_PROGRESS")
-                print_color "blue" "ECR stack is being processed. Waiting for completion..."
-                aws cloudformation wait stack-create-complete --stack-name "$ECR_STACK_NAME" 2>/dev/null || \
-                aws cloudformation wait stack-update-complete --stack-name "$ECR_STACK_NAME"
-                print_color "green" "ECR stack processing completed."
-                ;;
-            "ROLLBACK_COMPLETE")
-                print_color "red" "ECR stack is in ROLLBACK_COMPLETE state. Deleting it..."
-                aws cloudformation delete-stack --stack-name "$ECR_STACK_NAME"
-                aws cloudformation wait stack-delete-complete --stack-name "$ECR_STACK_NAME"
-                print_color "green" "ECR stack deleted. Will create new one."
-                deploy_ecr_stack_create
-                ;;
-            *)
-                print_color "yellow" "ECR stack in state: $STACK_STATUS. Attempting update..."
-                deploy_ecr_stack_update
-                ;;
-        esac
-    else
-        print_color "blue" "ECR stack does not exist. Creating new stack..."
-        deploy_ecr_stack_create
-    fi
-}
-
-# Function to create ECR stack
-deploy_ecr_stack_create() {
-    aws cloudformation create-stack \
-        --stack-name "$ECR_STACK_NAME" \
-        --template-body file://"$ECR_TEMPLATE" \
-        --parameters ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
-        --tags Key=Environment,Value="$ENVIRONMENT" Key=Project,Value="aws-ollama-platform"
-    
-    print_color "blue" "Waiting for ECR stack creation to complete..."
-    aws cloudformation wait stack-create-complete --stack-name "$ECR_STACK_NAME"
-    print_color "green" "✅ ECR stack created successfully"
-}
-
-# Function to update ECR stack
-deploy_ecr_stack_update() {
-    aws cloudformation deploy \
-        --template-file "$ECR_TEMPLATE" \
-        --stack-name "$ECR_STACK_NAME" \
-        --parameter-overrides Environment="$ENVIRONMENT" \
-        --tags Environment="$ENVIRONMENT" Project="aws-ollama-platform" \
-        --no-fail-on-empty-changeset
-    
-    print_color "green" "✅ ECR stack updated successfully"
-}
-
-# Function to build and push Docker images
+# Dockerイメージをビルドしてプッシュする関数
 build_and_push_images() {
-    print_color "blue" "🐳 Building and pushing Docker images to ECR..."
-    
-    # ECRにログイン
-    print_color "blue" "🔐 Logging in to ECR..."
-    aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-    
-    # ECRスタックからリポジトリURIを取得
-    print_color "blue" "📋 Getting ECR repository URIs from CloudFormation..."
-    BASE_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaBaseRepositoryUri")
-    LLAMA2_7B_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaLlama2_7bRepositoryUri")
-    LLAMA2_13B_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaLlama2_13bRepositoryUri")
-    CODELLAMA_7B_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaCodeLlama7bRepositoryUri")
-    CODELLAMA_13B_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaCodeLlama13bRepositoryUri")
-    MISTRAL_7B_REPO_URI=$(get_stack_output "$ECR_STACK_NAME" "OllamaMistral7bRepositoryUri")
-    
-    if [ -z "$BASE_REPO_URI" ]; then
-        print_color "red" "❌ Failed to get ECR repository URIs from CloudFormation stack"
-        exit 1
-    fi
-    
-    print_color "green" "✅ ECR repository URIs retrieved successfully"
-    
-    # ベースイメージをビルド
-    print_color "blue" "🏗️  Building base Ollama image..."
-    
-    if [ -d "docker/base" ]; then
-        cd docker/base
-        docker build -t ollama-base:latest .
-        docker tag ollama-base:latest $BASE_REPO_URI:latest
-        docker tag ollama-base:latest $BASE_REPO_URI:$(date +%Y%m%d-%H%M%S)
-        
-        print_color "blue" "📤 Pushing base image to ECR..."
-        docker push $BASE_REPO_URI:latest
-        docker push $BASE_REPO_URI:$(date +%Y%m%d-%H%M%S)
-        print_color "green" "✅ Base image pushed successfully"
-        cd ../..
-    else
-        print_color "red" "❌ Docker base directory not found. Please ensure docker/base exists."
-        exit 1
-    fi
-    
-    # モデル固有のイメージをビルド
-    declare -A MODEL_REPOS=(
-        ["llama2-7b"]="$LLAMA2_7B_REPO_URI"
-        ["llama2-13b"]="$LLAMA2_13B_REPO_URI"
-        ["codellama-7b"]="$CODELLAMA_7B_REPO_URI"
-        ["codellama-13b"]="$CODELLAMA_13B_REPO_URI"
-        ["mistral-7b"]="$MISTRAL_7B_REPO_URI"
-    )
-    
-    declare -A MODELS=(
-        ["llama2-7b"]="llama2:7b"
-        ["llama2-13b"]="llama2:13b"
-        ["codellama-7b"]="codellama:7b"
-        ["codellama-13b"]="codellama:13b"
-        ["mistral-7b"]="mistral:7b"
-    )
-    
-    for model_dir in "${!MODELS[@]}"; do
-        model_name="${MODELS[$model_dir]}"
-        repo_uri="${MODEL_REPOS[$model_dir]}"
-        
-        if [ -z "$repo_uri" ]; then
-            print_color "yellow" "⚠️  Repository URI not found for $model_dir, skipping..."
-            continue
-        fi
-        
-        print_color "blue" "🏗️  Building $model_name image..."
-        
-        # Dockerfileが存在しない場合は汎用的なものを作成
-        if [ ! -f "docker/models/$model_dir/Dockerfile" ]; then
-            print_color "yellow" "⚠️  Creating generic Dockerfile for $model_dir..."
-            mkdir -p docker/models/$model_dir
-            cat > docker/models/$model_dir/Dockerfile << EOF
-ARG BASE_IMAGE_URI
-FROM \${BASE_IMAGE_URI}:latest
+    print_color "blue" "🐳 DockerイメージをビルドしてECRにプッシュしています..."
 
-LABEL model="$model_name"
-ENV MODEL_NAME=$model_name
-ENV PRELOAD_MODEL=true
-EOF
-        fi
+    # ECRにログイン
+    print_color "blue" "🔐 ECRにログインしています..."
+    aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+    # メインのCFnスタックからリポジトリURIを取得
+    print_color "blue" "📋 CloudFormationスタック '$STACK_NAME' からECRリポジトリURIを取得しています..."
+    BASE_REPO_URI=$(get_stack_output "$STACK_NAME" "OllamaRepositoryUri")
+
+    if [ -z "$BASE_REPO_URI" ]; then
+        print_color "red" "❌ CloudFormationスタック '$STACK_NAME' からOllamaRepositoryUriの取得に失敗しました。"
+        return 1
+    fi
+    print_color "green" "✅ ECRリポジトリURI取得完了: $BASE_REPO_URI"
+
+    # ベースイメージをビルド（linux/amd64プラットフォームを明示的に指定）
+    local base_docker_dir="$PROJECT_ROOT/docker/base"
+    print_color "blue" "🏗️  '$base_docker_dir' からlinux/amd64用のベースOllamaイメージをビルドしています..."
+
+    if [ -d "$base_docker_dir" ] && [ -f "$base_docker_dir/Dockerfile" ]; then
+        local image_tag="$BASE_REPO_URI:latest"
+        local timestamp_tag="$BASE_REPO_URI:$(date +%Y%m%d-%H%M%S)"
+
+        # linux/amd64プラットフォームを明示的に指定してビルド
+        print_color "blue" "linux/amd64プラットフォーム用にビルドしています..."
+        docker build --platform linux/amd64 -t "$image_tag" "$base_docker_dir"
+        docker tag "$image_tag" "$timestamp_tag"
         
-        cd docker/models/$model_dir
-        docker build \
-            --build-arg BASE_IMAGE_URI=$BASE_REPO_URI \
-            -t ollama-$model_dir:latest .
+        print_color "blue" "📤 ベースイメージをECRにプッシュしています..."
+        docker push "$image_tag"
+        docker push "$timestamp_tag"
+        print_color "green" "✅ ベースイメージのプッシュが完了しました"
         
-        docker tag ollama-$model_dir:latest $repo_uri:latest
-        docker tag ollama-$model_dir:latest $repo_uri:$(date +%Y%m%d-%H%M%S)
-        
-        print_color "blue" "📤 Pushing $model_name image to ECR..."
-        docker push $repo_uri:latest
-        docker push $repo_uri:$(date +%Y%m%d-%H%M%S)
-        print_color "green" "✅ $model_name image pushed successfully"
-        
-        cd ../../..
-    done
-    
-    print_color "green" "🎉 All Docker images built and pushed successfully!"
+        # イメージの詳細情報を表示
+        print_color "blue" "📋 イメージ詳細:"
+        docker inspect "$image_tag" --format='{{.Architecture}} {{.Os}}' || true
+    else
+        print_color "red" "❌ '$base_docker_dir' にDockerfileが見つかりません。ベースイメージをビルドできません。"
+        return 1
+    fi
+
+    # 注意: 将来必要に応じて、モデル固有のイメージをビルドするロジックをここに追加してください。
+
+    print_color "green" "🎉 すべてのDockerイメージのビルドとプッシュが完了しました！"
 }
 
-# --- Main Deployment Process ---
 
-print_color "blue" "🚀 Starting AWS Ollama Platform Deployment..."
-print_color "blue" "AWS Account: $AWS_ACCOUNT_ID"
-print_color "blue" "Region: $AWS_REGION"
-print_color "blue" "Environment: $ENVIRONMENT"
+# --- メインデプロイプロセス ---
 
-# Check if Docker is running
-if ! docker info >/dev/null 2>&1; then
-    print_color "red" "❌ Docker is not running. Please start Docker and try again."
-    exit 1
-fi
+print_color "blue" "🚀 AWS Ollama プラットフォームのデプロイを開始しています..."
 
-# Check for S3 bucket for CloudFormation artifacts
+# 1. フロントエンドの依存関係をインストール（初期ビルドは設定更新後に実行）
 print_color "blue" "
-Checking for S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-if aws s3 ls "s3://$S3_BUCKET_FOR_ARTIFACTS" 2>&1 | grep -q 'NoSuchBucket'; then
-    print_color "blue" "Creating S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-    aws s3 mb "s3://$S3_BUCKET_FOR_ARTIFACTS" --region $AWS_REGION
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS created."
-else
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS already exists."
-fi
-
-# 1. Deploy ECR repositories with CloudFormation
-print_color "blue" "
-[Step 1/7] Deploying ECR repositories..."
-deploy_ecr_stack
-
-# 2. Build and push Docker images
-print_color "blue" "
-[Step 2/7] Building and pushing Docker images..."
-build_and_push_images
-
-# 3. Build the React frontend application
-print_color "blue" "
-[Step 3/7] Building React frontend application..."
+[ステップ 1/5] フロントエンドの依存関係をインストールしています..."
 if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    print_color "green" "node_modules already exists, skipping installation."
+    print_color "green" "node_modulesは既に存在するため、インストールをスキップします。"
 else
     (cd "$FRONTEND_DIR" && npm install)
 fi
-(cd "$FRONTEND_DIR" && npm run build)
-print_color "green" "Frontend build complete."
+print_color "green" "フロントエンドの依存関係の準備が完了しました。"
 
-# 4. Package the CloudFormation templates
+# 2. CloudFormationテンプレートをパッケージ化
 print_color "blue" "
-[Step 4/7] Packaging CloudFormation templates..."
+[ステップ 2/5] CloudFormationテンプレートをパッケージ化しています..."
 aws cloudformation package \
   --template-file "$MAIN_TEMPLATE" \
   --s3-bucket "$S3_BUCKET_FOR_ARTIFACTS" \
   --output-template-file "$PACKAGED_TEMPLATE"
-print_color "green" "CloudFormation templates packaged to $PACKAGED_TEMPLATE."
+print_color "green" "CloudFormationテンプレートを $PACKAGED_TEMPLATE にパッケージ化しました。"
 
-# 5. Deploy the main CloudFormation stack
-print_color "blue" "
-[Step 5/7] Deploying main AWS infrastructure with CloudFormation..."
-
-# スタックの存在確認
-STACK_EXISTS=false
-if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
-    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackStatus" --output text)
-    print_color "blue" "Stack $STACK_NAME exists with status: $STACK_STATUS"
-    
-    case "$STACK_STATUS" in
-        "CREATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being created. Waiting for completion..."
-            aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack creation completed."
-            STACK_EXISTS=true
-            ;;
-        "UPDATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being updated. Waiting for completion..."
-            aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack update completed."
-            STACK_EXISTS=true
-            ;;
-        "ROLLBACK_COMPLETE")
-            print_color "red" "Stack is in ROLLBACK_COMPLETE state. Deleting it..."
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deleted successfully."
-            STACK_EXISTS=false
-            ;;
-        "CREATE_COMPLETE"|"UPDATE_COMPLETE")
-            print_color "green" "Stack is ready for updates."
-            STACK_EXISTS=true
-            ;;
-        "DELETE_IN_PROGRESS")
-            print_color "blue" "Stack is being deleted. Waiting for completion..."
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deletion completed."
-            STACK_EXISTS=false
-            ;;
-        *)
-            print_color "red" "Stack is in unexpected state: $STACK_STATUS"
-            print_color "red" "Please check the CloudFormation console and resolve manually."
-            exit 1
-            ;;
-    esac
-else
-    print_color "blue" "Stack $STACK_NAME does not exist. Will create new stack."
-    STACK_EXISTS=false
-fi
-
-# スタックの作成または更新
-if [ "$STACK_EXISTS" = true ]; then
-    print_color "blue" "Updating existing stack..."
-    if aws cloudformation deploy \
-      --template-file "$PACKAGED_TEMPLATE" \
-      --stack-name "$STACK_NAME" \
-      --parameter-overrides file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-      --no-fail-on-empty-changeset; then
-        print_color "green" "Stack update completed successfully."
-    else
-        print_color "red" "Stack update failed."
+# parameters.jsonをチェックし、存在しない場合はテンプレートから作成
+if [ ! -f "$PROJECT_ROOT/$PARAMETERS_FILE" ]; then
+    print_color "yellow" "⚠️  プロジェクトルートに $PARAMETERS_FILE が見つかりません。"
+    if [ -f "$PROJECT_ROOT/parameters-template.json" ]; then
+        print_color "blue" "テンプレートから $PARAMETERS_FILE を作成しています..."
+        cp "$PROJECT_ROOT/parameters-template.json" "$PROJECT_ROOT/$PARAMETERS_FILE"
+        print_color "green" "✅ $PARAMETERS_FILE を正常に作成しました。"
+        print_color "yellow" "重要: 新しく作成された '$PARAMETERS_FILE' を確認・編集してから、スクリプトを再実行してください。"
         exit 1
-    fi
-else
-    print_color "blue" "Creating new stack..."
-    if aws cloudformation create-stack \
-      --stack-name "$STACK_NAME" \
-      --template-body file://"$PACKAGED_TEMPLATE" \
-      --parameters file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
-        
-        print_color "blue" "Waiting for stack creation to complete..."
-        if aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"; then
-            print_color "green" "Stack creation completed successfully."
-        else
-            print_color "red" "Stack creation failed or timed out."
-            print_color "red" "Check the CloudFormation console for details."
-            exit 1
-        fi
     else
-        print_color "red" "Failed to initiate stack creation."
+        print_color "red" "❌ 'parameters-template.json' が見つかりません。'$PARAMETERS_FILE' を作成できません。"
         exit 1
     fi
 fi
 
-print_color "green" "CloudFormation stack deployment complete."
-
-# 6. Get stack outputs
+# 3. メインのCloudFormationスタックをデプロイ
 print_color "blue" "
-[Step 6/7] Retrieving S3 bucket and CloudFront distribution from stack outputs..."
+[ステップ 3/5] CloudFormationでメインのAWSインフラストラクチャをデプロイしています..."
+aws cloudformation deploy \
+    --template-file "$PACKAGED_TEMPLATE" \
+    --stack-name "$STACK_NAME" \
+    --parameter-overrides file://"$PARAMETERS_FILE" \
+    --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+    --no-fail-on-empty-changeset
+print_color "green" "✅ CloudFormationスタックのデプロイを開始しました。"
 
-S3_BUCKET_NAME=$(get_stack_output "$STACK_NAME" "S3BucketName")
-CLOUDFRONT_ID=$(get_stack_output "$STACK_NAME" "CloudFrontDistributionId")
+print_color "blue" "スタックのデプロイ完了を待機しています..."
+aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" 2>/dev/null || \
+aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
+print_color "green" "✅ CloudFormationスタックのデプロイが完了しました。"
+
+
+# 4. Dockerイメージをビルドしてプッシュ（メインスタックの準備完了後）
+print_color "blue" "
+[ステップ 4/5] Dockerイメージをビルドしてプッシュしています..."
+build_and_push_images
+
+# ステップ 5: フロントエンドアセットをS3にデプロイし、CloudFrontキャッシュを無効化
+print_color "blue" "
+[ステップ 5/5] フロントエンドアセットをデプロイし、CloudFrontキャッシュを無効化しています..."
+
+# CloudFormationスタックから出力を取得
+print_color "blue" "スタック出力を取得しています..."
+FRONTEND_S3_BUCKET_NAME=$(get_stack_output "$STACK_NAME" "FrontendS3BucketName")
+CLOUDFRONT_DISTRIBUTION_ID=$(get_stack_output "$STACK_NAME" "CloudFrontDistributionId")
 CLOUDFRONT_URL=$(get_stack_output "$STACK_NAME" "CloudFrontURL")
 USER_POOL_ID=$(get_stack_output "$STACK_NAME" "UserPoolId")
 USER_POOL_CLIENT_ID=$(get_stack_output "$STACK_NAME" "UserPoolClientId")
+API_GATEWAY_URL=$(get_stack_output "$STACK_NAME" "APIGatewayURL")
 
-print_color "green" "- User Pool ID: $USER_POOL_ID"
-print_color "green" "- User Pool Client ID: $USER_POOL_CLIENT_ID"
-print_color "green" "- S3 Bucket Name: $S3_BUCKET_NAME"
-print_color "green" "- CloudFront ID: $CLOUDFRONT_ID"
-
-# Check if we got the required outputs
-if [ -z "$S3_BUCKET_NAME" ]; then
-    print_color "red" "Error: Could not find S3 bucket name in CloudFormation stack outputs."
+if [ -z "$FRONTEND_S3_BUCKET_NAME" ] || [ -z "$USER_POOL_ID" ] || [ -z "$USER_POOL_CLIENT_ID" ]; then
+    print_color "red" "エラー: CloudFormationスタックから必要な出力を取得できませんでした。"
+    print_color "red" "不足: FrontendS3BucketName、UserPoolId、またはUserPoolClientId"
     exit 1
 fi
 
-# 7. Deploy frontend assets to S3 and invalidate CloudFront cache
-print_color "blue" "
-[Step 7/7] Deploying frontend assets to S3 and invalidating CloudFront cache..."
+print_color "green" "スタック出力を取得しました:"
+print_color "green" "- S3バケット: $FRONTEND_S3_BUCKET_NAME"
+print_color "green" "- CloudFront ID: $CLOUDFRONT_DISTRIBUTION_ID"
+print_color "green" "- ユーザープールID: $USER_POOL_ID"
+print_color "green" "- ユーザープールクライアントID: $USER_POOL_CLIENT_ID"
+print_color "green" "- API Gateway URL: $API_GATEWAY_URL"
 
-# Upload frontend configuration
-aws s3 cp "$FRONTEND_DIR/build/config.js" "s3://$S3_BUCKET_NAME/config.js" --content-type "application/javascript"
-print_color "green" "- Frontend configuration uploaded to S3."
+# 実際にデプロイされた値でフロントエンド環境設定を更新
+print_color "blue" "フロントエンド環境設定を更新しています..."
 
-# Sync frontend assets to S3
-aws s3 sync "$FRONTEND_DIR/build/" "s3://$S3_BUCKET_NAME/" --delete
-print_color "green" "- Frontend assets synced to S3."
-
-# Invalidate CloudFront cache
-if [ -n "$CLOUDFRONT_ID" ]; then
-    aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_ID" --paths "/*" >/dev/null
-    print_color "green" "- CloudFront cache invalidation created."
+# 既存の設定ファイルをバックアップ
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+if [ -f "$ENV_PRODUCTION_FILE" ]; then
+    cp "$ENV_PRODUCTION_FILE" "$ENV_PRODUCTION_FILE.backup.$TIMESTAMP"
+    print_color "blue" "既存の .env.production を .env.production.backup.$TIMESTAMP にバックアップしました"
 fi
 
-# 8. Populate DynamoDB with model data
-print_color "blue" "
-[Bonus] Populating DynamoDB with model data..."
-if [ -f "scripts/populate-models.py" ]; then
-    python3 scripts/populate-models.py
-    print_color "green" "- Model data populated in DynamoDB."
-else
-    print_color "yellow" "⚠️  populate-models.py not found. Skipping model data population."
+# 実際にデプロイされた値で .env.production を生成
+ENV_PRODUCTION_FILE="$FRONTEND_DIR/.env.production"
+cat > "$ENV_PRODUCTION_FILE" << EOF
+# 本番環境設定（自動生成）
+# 生成日時: $(date)
+# CloudFormationスタック: $STACK_NAME
+
+# API設定
+VITE_API_URL=$API_GATEWAY_URL
+
+# AWS設定
+VITE_AWS_REGION=$AWS_REGION
+
+# Cognito設定
+VITE_USER_POOL_ID=$USER_POOL_ID
+VITE_USER_POOL_CLIENT_ID=$USER_POOL_CLIENT_ID
+
+# 環境
+VITE_ENVIRONMENT=production
+EOF
+
+print_color "green" "✅ デプロイされた値で .env.production を更新しました:"
+print_color "blue" "   - API URL: $API_GATEWAY_URL"
+print_color "blue" "   - AWSリージョン: $AWS_REGION"
+print_color "blue" "   - ユーザープールID: $USER_POOL_ID"
+print_color "blue" "   - クライアントID: $USER_POOL_CLIENT_ID"
+
+# 開発環境の一貫性のために .env.local も更新
+ENV_LOCAL_FILE="$FRONTEND_DIR/.env.local"
+if [ -f "$ENV_LOCAL_FILE" ]; then
+    cp "$ENV_LOCAL_FILE" "$ENV_LOCAL_FILE.backup.$TIMESTAMP"
 fi
 
-print_color "blue" "
---------------------------------------------------"
-print_color "green" "🚀 Deployment Successful! 🚀"
-print_color "blue" "--------------------------------------------------"
-print_color "green" "You can now access your application at:"
-print_color "blue" "$CLOUDFRONT_URL"
-print_color "blue" "
-📋 Next Steps:"
-print_color "blue" "1. Create admin user:"
-print_color "blue" "   aws cognito-idp admin-create-user \\"
-print_color "blue" "     --user-pool-id $USER_POOL_ID \\"
-print_color "blue" "     --username admin \\"
-print_color "blue" "     --user-attributes Name=email,Value=your-email@example.com \\"
-print_color "blue" "     --temporary-password TempPass123! \\"
-print_color "blue" "     --message-action SUPPRESS"
-print_color "blue" "
-2. Generate frontend configuration:"
-print_color "blue" "   sh scripts/generate-config.sh"
-print_color "blue" "
-3. Access the application and start deploying models!"
+cat > "$ENV_LOCAL_FILE" << EOF
+# 開発環境設定（実際のCognito設定を使用）
+# 生成日時: $(date)
 
-# --- Main Deployment Process ---
+# APIエンドポイント（本番環境では実際のAPI Gateway URLを設定）
+VITE_API_URL=$API_GATEWAY_URL
 
-print_color "blue" "Starting AWS Ollama Platform Deployment..."
-print_color "blue" "AWS Account: $AWS_ACCOUNT_ID"
-print_color "blue" "Region: $AWS_REGION"
-print_color "blue" "Environment: $ENVIRONMENT"
+# AWS設定（実際の値）
+VITE_AWS_REGION=$AWS_REGION
+VITE_USER_POOL_ID=$USER_POOL_ID
+VITE_USER_POOL_CLIENT_ID=$USER_POOL_CLIENT_ID
 
-# Check if Docker is running
-if ! docker info >/dev/null 2>&1; then
-    print_color "red" "❌ Docker is not running. Please start Docker and try again."
-    exit 1
-fi
 
-# Check for S3 bucket for CloudFormation artifacts
-print_color "blue" "
-Checking for S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-if aws s3 ls "s3://$S3_BUCKET_FOR_ARTIFACTS" 2>&1 | grep -q 'NoSuchBucket'; then
-    print_color "blue" "Creating S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-    aws s3 mb "s3://$S3_BUCKET_FOR_ARTIFACTS" --region $AWS_REGION
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS created."
-else
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS already exists."
-fi
+# 環境
+VITE_ENVIRONMENT=development
+EOF
 
-# 1. Build and push Docker images
-print_color "blue" "
-[Step 1/6] Building and pushing Docker images..."
-build_and_push_images
+print_color "green" "✅ 開発環境の一貫性のために .env.local を更新しました"
 
-# 2. Build the React frontend application
-print_color "blue" "
-[Step 2/6] Building React frontend application..."
-if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    print_color "green" "node_modules already exists, skipping installation."
-else
-    (cd "$FRONTEND_DIR" && npm install)
-fi
+# 更新された設定でフロントエンドを再ビルド
+print_color "blue" "更新された設定でフロントエンドを再ビルドしています..."
 (cd "$FRONTEND_DIR" && npm run build)
-print_color "green" "Frontend build complete."
+print_color "green" "✅ 更新された設定でフロントエンドを再ビルドしました"
 
-# 3. Package the CloudFormation templates
-print_color "blue" "
-[Step 3/6] Packaging CloudFormation templates..."
-aws cloudformation package \
-  --template-file "$MAIN_TEMPLATE" \
-  --s3-bucket "$S3_BUCKET_FOR_ARTIFACTS" \
-  --output-template-file "$PACKAGED_TEMPLATE"
-print_color "green" "CloudFormation templates packaged to $PACKAGED_TEMPLATE."
+# フロントエンド用の設定ファイルを作成（JavaScriptコンフィグをフォールバックとして）
+print_color "blue" "ランタイム設定ファイルを生成しています..."
+CONFIG_JS="window.AWS_OLLAMA_CONFIG = { 
+  region: '$AWS_REGION', 
+  userPoolId: '$USER_POOL_ID', 
+  userPoolWebClientId: '$USER_POOL_CLIENT_ID',
+  apiUrl: '${API_GATEWAY_URL:-https://api.example.com}'
+};"
+echo "$CONFIG_JS" > "$FRONTEND_DIR/dist/config.js"
+print_color "green" "✅ ランタイム設定ファイルを作成しました"
 
-# 4. Deploy the CloudFormation stack
-print_color "blue" "
-[Step 4/6] Deploying AWS infrastructure with CloudFormation..."
+# ビルドディレクトリをS3バケットと同期
+print_color "blue" "アセットをS3にアップロードしています..."
+aws s3 sync "$FRONTEND_DIR/dist/" "s3://$FRONTEND_S3_BUCKET_NAME/" --delete
+print_color "green" "- フロントエンドアセットをS3に同期しました。"
 
-# スタックの存在確認
-STACK_EXISTS=false
-if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
-    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackStatus" --output text)
-    print_color "blue" "Stack $STACK_NAME exists with status: $STACK_STATUS"
-    
-    case "$STACK_STATUS" in
-        "CREATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being created. Waiting for completion..."
-            aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack creation completed."
-            STACK_EXISTS=true
-            ;;
-        "UPDATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being updated. Waiting for completion..."
-            aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack update completed."
-            STACK_EXISTS=true
-            ;;
-        "ROLLBACK_COMPLETE")
-            print_color "red" "Stack is in ROLLBACK_COMPLETE state. Deleting it..."
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deleted successfully."
-            STACK_EXISTS=false
-            ;;
-        "CREATE_COMPLETE"|"UPDATE_COMPLETE")
-            print_color "green" "Stack is ready for updates."
-            STACK_EXISTS=true
-            ;;
-        "DELETE_IN_PROGRESS")
-            print_color "blue" "Stack is being deleted. Waiting for completion..."
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deletion completed."
-            STACK_EXISTS=false
-            ;;
-        *)
-            print_color "red" "Stack is in unexpected state: $STACK_STATUS"
-            print_color "red" "Please check the CloudFormation console and resolve manually."
-            exit 1
-            ;;
-    esac
-else
-    print_color "blue" "Stack $STACK_NAME does not exist. Will create new stack."
-    STACK_EXISTS=false
-fi
-
-# スタックの作成または更新
-if [ "$STACK_EXISTS" = true ]; then
-    print_color "blue" "Updating existing stack..."
-    if aws cloudformation deploy \
-      --template-file "$PACKAGED_TEMPLATE" \
-      --stack-name "$STACK_NAME" \
-      --parameter-overrides file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-      --no-fail-on-empty-changeset; then
-        print_color "green" "Stack update completed successfully."
-    else
-        print_color "red" "Stack update failed."
-        exit 1
-    fi
-else
-    print_color "blue" "Creating new stack..."
-    if aws cloudformation create-stack \
-      --stack-name "$STACK_NAME" \
-      --template-body file://"$PACKAGED_TEMPLATE" \
-      --parameters file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
-        
-        print_color "blue" "Waiting for stack creation to complete..."
-        if aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"; then
-            print_color "green" "Stack creation completed successfully."
-        else
-            print_color "red" "Stack creation failed or timed out."
-            print_color "red" "Check the CloudFormation console for details."
-            exit 1
-        fi
-    else
-        print_color "red" "Failed to initiate stack creation."
-        exit 1
-    fi
-fi
-
-print_color "green" "CloudFormation stack deployment complete."
-
-# 5. Get stack outputs
-print_color "blue" "
-[Step 5/6] Retrieving S3 bucket and CloudFront distribution from stack outputs..."
-
-# 出力値を安全に取得する関数
-get_stack_output() {
-    local output_key=$1
-    aws cloudformation describe-stacks \
-        --stack-name "$STACK_NAME" \
-        --query "Stacks[0].Outputs[?OutputKey=='$output_key'].OutputValue" \
-        --output text 2>/dev/null || echo ""
-}
-
-S3_BUCKET_NAME=$(get_stack_output "S3BucketName")
-CLOUDFRONT_ID=$(get_stack_output "CloudFrontDistributionId")
-CLOUDFRONT_URL=$(get_stack_output "CloudFrontURL")
-USER_POOL_ID=$(get_stack_output "UserPoolId")
-USER_POOL_CLIENT_ID=$(get_stack_output "UserPoolClientId")
-
-print_color "green" "- User Pool ID: $USER_POOL_ID"
-print_color "green" "- User Pool Client ID: $USER_POOL_CLIENT_ID"
-print_color "green" "- S3 Bucket Name: $S3_BUCKET_NAME"
-print_color "green" "- CloudFront ID: $CLOUDFRONT_ID"
-
-# Check if we got the required outputs
-if [ -z "$S3_BUCKET_NAME" ]; then
-    print_color "red" "Error: Could not find S3 bucket name in CloudFormation stack outputs."
-    exit 1
-fi
-
-# 6. Deploy frontend assets to S3 and invalidate CloudFront cache
-print_color "blue" "
-[Step 6/6] Deploying frontend assets to S3 and invalidating CloudFront cache..."
-
-# Upload frontend configuration
-aws s3 cp "$FRONTEND_DIR/build/config.js" "s3://$S3_BUCKET_NAME/config.js" --content-type "application/javascript"
-print_color "green" "- Frontend configuration uploaded to S3."
-
-# Sync frontend assets to S3
-aws s3 sync "$FRONTEND_DIR/build/" "s3://$S3_BUCKET_NAME/" --delete
-print_color "green" "- Frontend assets synced to S3."
-
-# Invalidate CloudFront cache
-if [ -n "$CLOUDFRONT_ID" ]; then
-    aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_ID" --paths "/*" >/dev/null
-    print_color "green" "- CloudFront cache invalidation created."
-fi
-
-# 7. Populate DynamoDB with model data
-print_color "blue" "
-[Step 7/7] Populating DynamoDB with model data..."
-if [ -f "scripts/populate-models.py" ]; then
-    python3 scripts/populate-models.py
-    print_color "green" "- Model data populated in DynamoDB."
-else
-    print_color "yellow" "⚠️  populate-models.py not found. Skipping model data population."
+# CloudFrontキャッシュを無効化
+if [ -n "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+    print_color "blue" "CloudFrontキャッシュを無効化しています..."
+    aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "/*" > /dev/null
+    print_color "green" "- CloudFrontキャッシュの無効化を作成しました。"
 fi
 
 print_color "blue" "
 --------------------------------------------------"
-print_color "green" "🚀 Deployment Successful! 🚀"
+print_color "green" "🚀 デプロイ成功！ 🚀"
 print_color "blue" "--------------------------------------------------"
-print_color "green" "You can now access your application at:"
+print_color "green" "以下のURLでアプリケーションにアクセスできます:"
 print_color "blue" "$CLOUDFRONT_URL"
-print_color "blue" "
-📋 Next Steps:"
-print_color "blue" "1. Create admin user:"
-print_color "blue" "   aws cognito-idp admin-create-user \\"
-print_color "blue" "     --user-pool-id $USER_POOL_ID \\"
-print_color "blue" "     --username admin \\"
-print_color "blue" "     --user-attributes Name=email,Value=your-email@example.com \\"
-print_color "blue" "     --temporary-password TempPass123! \\"
-print_color "blue" "     --message-action SUPPRESS"
-print_color "blue" "
-2. Generate frontend configuration:"
-print_color "blue" "   sh scripts/generate-config.sh"
-print_color "blue" "
-3. Access the application and start deploying models!"
-
-# --- Script Start ---
-
-print_color "blue" "Starting AWS Ollama Platform Deployment..."
-
-# Check if stack is in ROLLBACK_COMPLETE state and delete it
-STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_EXISTS")
-if [ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]; then
-    print_color "red" "Stack $STACK_NAME is in ROLLBACK_COMPLETE state. Deleting it before proceeding..."
-    aws cloudformation delete-stack --stack-name "$STACK_NAME"
-    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-    print_color "green" "Stack $STACK_NAME deleted successfully."
-fi
-
-# Create S3 bucket for CloudFormation artifacts if it doesn't exist
-print_color "blue" "
-Checking for S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-if ! aws s3 ls "s3://$S3_BUCKET_FOR_ARTIFACTS" 2>&1 | grep -q 'NoSuchBucket'; then
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS already exists."
-else
-    print_color "blue" "Creating S3 bucket for CloudFormation artifacts: $S3_BUCKET_FOR_ARTIFACTS"
-    aws s3 mb "s3://$S3_BUCKET_FOR_ARTIFACTS" --region $AWS_REGION
-    print_color "green" "S3 bucket $S3_BUCKET_FOR_ARTIFACTS created."
-fi
-
-# 1. Build the React frontend application
-print_color "blue" "
-[Step 1/5] Building React frontend application..."
-if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    print_color "green" "node_modules already exists, skipping installation."
-else
-    (cd "$FRONTEND_DIR" && npm install)
-fi
-(cd "$FRONTEND_DIR" && npm run build)
-print_color "green" "Frontend build complete."
-
-# 2. Package the CloudFormation templates
-print_color "blue" "
-[Step 2/5] Packaging CloudFormation templates..."
-aws cloudformation package \
-  --template-file "$MAIN_TEMPLATE" \
-  --s3-bucket "$S3_BUCKET_FOR_ARTIFACTS" \
-  --output-template-file "$PACKAGED_TEMPLATE"
-print_color "green" "CloudFormation templates packaged to $PACKAGED_TEMPLATE."
-
-# 3. Deploy the CloudFormation stack
-print_color "blue" "
-[Step 3/5] Deploying AWS infrastructure with CloudFormation..."
-
-# スタックの存在確認
-STACK_EXISTS=false
-if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
-    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackStatus" --output text)
-    print_color "blue" "Stack $STACK_NAME exists with status: $STACK_STATUS"
-    
-    case "$STACK_STATUS" in
-        "CREATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being created. Waiting for completion..."
-            aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack creation completed."
-            STACK_EXISTS=true
-            ;;
-        "UPDATE_IN_PROGRESS")
-            print_color "blue" "Stack is currently being updated. Waiting for completion..."
-            aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack update completed."
-            STACK_EXISTS=true
-            ;;
-        "ROLLBACK_COMPLETE")
-            print_color "red" "Stack is in ROLLBACK_COMPLETE state. Deleting it..."
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deleted successfully."
-            STACK_EXISTS=false
-            ;;
-        "CREATE_COMPLETE"|"UPDATE_COMPLETE")
-            print_color "green" "Stack is ready for updates."
-            STACK_EXISTS=true
-            ;;
-        "DELETE_IN_PROGRESS")
-            print_color "blue" "Stack is being deleted. Waiting for completion..."
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            print_color "green" "Stack deletion completed."
-            STACK_EXISTS=false
-            ;;
-        *)
-            print_color "red" "Stack is in unexpected state: $STACK_STATUS"
-            print_color "red" "Please check the CloudFormation console and resolve manually."
-            exit 1
-            ;;
-    esac
-else
-    print_color "blue" "Stack $STACK_NAME does not exist. Will create new stack."
-    STACK_EXISTS=false
-fi
-
-# スタックの作成または更新
-if [ "$STACK_EXISTS" = true ]; then
-    print_color "blue" "Updating existing stack..."
-    if aws cloudformation deploy \
-      --template-file "$PACKAGED_TEMPLATE" \
-      --stack-name "$STACK_NAME" \
-      --parameter-overrides file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-      --no-fail-on-empty-changeset; then
-        print_color "green" "Stack update completed successfully."
-    else
-        print_color "red" "Stack update failed."
-        exit 1
-    fi
-else
-    print_color "blue" "Creating new stack..."
-    if aws cloudformation create-stack \
-      --stack-name "$STACK_NAME" \
-      --template-body file://"$PACKAGED_TEMPLATE" \
-      --parameters file://"$PARAMETERS_FILE" \
-      --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
-        
-        print_color "blue" "Waiting for stack creation to complete..."
-        if aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"; then
-            print_color "green" "Stack creation completed successfully."
-        else
-            print_color "red" "Stack creation failed or timed out."
-            print_color "red" "Check the CloudFormation console for details."
-            exit 1
-        fi
-    else
-        print_color "red" "Failed to initiate stack creation."
-        exit 1
-    fi
-fi
-
-print_color "green" "CloudFormation stack deployment complete."
-
-# 4. Get stack outputs
-print_color "blue" "
-[Step 4/5] Retrieving S3 bucket and CloudFront distribution from stack outputs..."
-
-# 出力値を安全に取得する関数
-get_stack_output() {
-    local output_key=$1
-    aws cloudformation describe-stacks \
-        --stack-name "$STACK_NAME" \
-        --query "Stacks[0].Outputs[?OutputKey=='$output_key'].OutputValue" \
-        --output text 2>/dev/null || echo ""
-}
-
-S3_BUCKET_NAME=$(get_stack_output "S3BucketName")
-CLOUDFRONT_ID=$(get_stack_output "CloudFrontDistributionId")
-CLOUDFRONT_URL=$(get_stack_output "CloudFrontURL")
-USER_POOL_ID=$(get_stack_output "UserPoolId")
-USER_POOL_CLIENT_ID=$(get_stack_output "UserPoolClientId")
-
-print_color "green" "- User Pool ID: $USER_POOL_ID"
-print_color "green" "- User Pool Client ID: $USER_POOL_CLIENT_ID"
-
-if [ -z "$S3_BUCKET_NAME" ]; then
-    print_color "red" "Error: Could not find S3 bucket name in CloudFormation stack outputs."
-    exit 1
-fi
-print_color "green" "- S3 Bucket Name: $S3_BUCKET_NAME"
-print_color "green" "- CloudFront ID: $CLOUDFRONT_ID"
-
-# 5. Deploy frontend to S3 and invalidate CloudFront
-print_color "blue" "
-[Step 5/5] Deploying frontend assets to S3 and invalidating CloudFront cache..."
-
-# Create a configuration file for the frontend
-CONFIG_JS="window.AWS_OLLAMA_CONFIG = { region: '$AWS_REGION', userPoolId: '$USER_POOL_ID', userPoolWebClientId: '$USER_POOL_CLIENT_ID' };"
-echo "$CONFIG_JS" > "$FRONTEND_DIR/build/config.js"
-aws s3 cp "$FRONTEND_DIR/build/config.js" "s3://$S3_BUCKET_NAME/config.js"
-print_color "green" "- Frontend configuration uploaded to S3."
-
-# Sync the build directory with the S3 bucket
-aws s3 sync "$FRONTEND_DIR/build/" "s3://$S3_BUCKET_NAME/" --delete
-print_color "green" "- Frontend assets synced to S3."
-
-# Invalidate the CloudFront cache
-if [ -z "$CLOUDFRONT_ID" ]; then
-    print_color "red" "Warning: Could not find CloudFront distribution ID. Cache invalidation skipped."
-else
-    aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_ID" --paths "/*" > /dev/null
-    print_color "green" "- CloudFront cache invalidation created."
-fi
-
-print_color "blue" "
---------------------------------------------------"
-print_color "green" "🚀 Deployment Successful! 🚀"
-print_color "blue" "--------------------------------------------------"
-print_color "green" "You can now access your application at:"
-print_color "blue" "$CLOUDFRONT_URL"
+print_color "blue" ""
+print_color "green" "設定概要:"
+print_color "blue" "- CloudFormationスタック: $STACK_NAME"
+print_color "blue" "- AWSリージョン: $AWS_REGION"
+print_color "blue" "- ユーザープールID: $USER_POOL_ID"
+print_color "blue" "- クライアントID: $USER_POOL_CLIENT_ID"
+print_color "blue" "- API Gateway URL: $API_GATEWAY_URL"
+print_color "blue" "- S3バケット: $FRONTEND_S3_BUCKET_NAME"
+print_color "blue" "- CloudFrontディストリビューション: $CLOUDFRONT_DISTRIBUTION_ID"
+print_color "blue" ""
+print_color "yellow" "次のステップ:"
+print_color "blue" "1. 以下のURLでアプリケーションにアクセス: $CLOUDFRONT_URL"
+print_color "blue" ""
+print_color "blue" "2. parameters.jsonの認証情報でログイン:"
+print_color "blue" "   ユーザー名: admin"
+print_color "blue" "   パスワード: $(grep -o '"AdminPassword"[^"]*"[^"]*"[^"]*"[^"]*' $PROJECT_ROOT/parameters.json | cut -d'"' -f8 2>/dev/null || echo 'parameters.jsonを確認してください')"
+print_color "blue" ""
+print_color "green" "✅ パスワード変更は不要です - 直接ログインできます！"
+print_color "blue" ""
+print_color "green" "設定ファイルが更新されました:"
+print_color "blue" "- $FRONTEND_DIR/.env.production （実際にデプロイされた値）"
+print_color "blue" "- $FRONTEND_DIR/.env.local （開発用）"
+print_color "blue" "- バックアップファイルがタイムスタンプ付きで作成されました: $TIMESTAMP"

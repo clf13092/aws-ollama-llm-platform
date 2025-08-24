@@ -11,7 +11,7 @@ import {
   CircularProgress,
   Divider
 } from '@mui/material';
-import { Login as LoginIcon, PersonAdd as SignUpIcon } from '@mui/icons-material';
+import { Login as LoginIcon } from '@mui/icons-material';
 import { useAuth } from '../../contexts/AuthContext';
 
 interface LoginFormProps {
@@ -164,13 +164,19 @@ export const LoginForm = ({ onSwitchToSignUp, onSwitchToForgotPassword }: LoginF
             </Typography>
           </Box>
 
-          {/* デモ用情報 */}
-          <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-            <Typography variant="caption" color="text.secondary" display="block">
-              <strong>デモ用アカウント:</strong>
+          {/* ログイン情報案内 */}
+          <Box sx={{ mt: 3, p: 2, bgcolor: 'info.light', borderRadius: 1, color: 'info.contrastText' }}>
+            <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 1 }}>
+              📋 初回ログイン情報
             </Typography>
-            <Typography variant="caption" color="text.secondary" display="block">
-              管理者にお問い合わせください
+            <Typography variant="caption" display="block" sx={{ mb: 0.5 }}>
+              <strong>ユーザー名:</strong> admin
+            </Typography>
+            <Typography variant="caption" display="block" sx={{ mb: 0.5 }}>
+              <strong>初期パスワード:</strong> parameters.jsonで設定されたAdminPassword
+            </Typography>
+            <Typography variant="caption" display="block" sx={{ fontSize: '0.7rem', opacity: 0.8 }}>
+              ※ 初回ログイン後、新しいパスワードを設定すると自動的にログインされます
             </Typography>
           </Box>
         </CardContent>

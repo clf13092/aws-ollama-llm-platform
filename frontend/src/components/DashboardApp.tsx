@@ -24,7 +24,12 @@ import {
   Skeleton,
   Menu,
   MenuItem,
-  Avatar
+  Avatar,
+  FormControl,
+  FormLabel,
+  RadioGroup,
+  FormControlLabel,
+  Radio
 } from '@mui/material';
 import {
   PlayArrow,
@@ -47,34 +52,42 @@ import { useAuth } from '../contexts/AuthContext';
 export const DashboardApp = () => {
   const { user, signOut } = useAuth();
   
-  // カスタムフックを使用してデータを管理
   const { models, loading: modelsLoading, error: modelsError, refetch: refetchModels } = useModels();
-  const { 
-    instances, 
-    loading: instancesLoading, 
-    error: instancesError, 
+  const {
+    instances,
+    loading: instancesLoading,
+    error: instancesError,
     refetch: refetchInstances,
     deployModel,
     stopInstance
   } = useInstances();
 
-  // UI状態管理
   const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
   const [deployDialogOpen, setDeployDialogOpen] = useState(false);
-  const [instanceType, setInstanceType] = useState('ml.m5.large');
+  const [instanceType, setInstanceType] = useState('{"cpu": 2048, "memory": 8192}');
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState('');
   const [deployLoading, setDeployLoading] = useState(false);
   const [userMenuAnchor, setUserMenuAnchor] = useState<null | HTMLElement>(null);
+  const [compute, setCompute] = useState('fargate');
 
-  // モデルデプロイ処理
   const handleDeployModel = async (model: LLMModel) => {
     try {
       setDeployLoading(true);
-      await deployModel(model.id, instanceType);
+      let body = {};
+      if (compute === 'fargate') {
+        body = { fargate_resources: JSON.parse(instanceType) };
+      } else {
+        body = { instance_type: instanceType };
+      }
+      await deployModel(model.id, body);
       setDeployDialogOpen(false);
       setSnackbarMessage(`${model.name} のデプロイを開始しました`);
       setSnackbarOpen(true);
+      
+      setTimeout(() => {
+        refetchInstances();
+      }, 1000);
     } catch (error) {
       setSnackbarMessage(`デプロイに失敗しました: ${error instanceof Error ? error.message : '不明なエラー'}`);
       setSnackbarOpen(true);
@@ -83,7 +96,6 @@ export const DashboardApp = () => {
     }
   };
 
-  // インスタンス停止処理
   const handleStopInstance = async (instanceId: string, modelName: string) => {
     try {
       await stopInstance(instanceId);
@@ -95,14 +107,16 @@ export const DashboardApp = () => {
     }
   };
 
-  // エンドポイントURLをクリップボードにコピー
-  const copyEndpoint = (endpoint: string) => {
-    navigator.clipboard.writeText(endpoint);
-    setSnackbarMessage('エンドポイントURLをコピーしました');
+  const copyToClipboard = (text: string, message: string) => {
+    navigator.clipboard.writeText(text);
+    setSnackbarMessage(message);
     setSnackbarOpen(true);
   };
 
-  // ユーザーメニューの処理
+  const copyEndpoint = (endpoint: string) => {
+    copyToClipboard(endpoint, 'エンドポイントURLをコピーしました');
+  };
+
   const handleUserMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setUserMenuAnchor(event.currentTarget);
   };
@@ -116,7 +130,6 @@ export const DashboardApp = () => {
     await signOut();
   };
 
-  // カテゴリ別の色
   const getCategoryColor = (category: string) => {
     switch (category) {
       case 'chat': return '#4CAF50';
@@ -126,10 +139,10 @@ export const DashboardApp = () => {
     }
   };
 
-  // ステータス別の色とアイコン
   const getStatusInfo = (status: string) => {
-    switch (status) {
+    switch (status.toLowerCase()) {
       case 'starting':
+      case 'deploying':
         return { color: '#FF9800', icon: <CloudQueue />, text: '起動中...' };
       case 'running':
         return { color: '#4CAF50', icon: <CheckCircle />, text: '実行中' };
@@ -138,11 +151,10 @@ export const DashboardApp = () => {
       case 'error':
         return { color: '#F44336', icon: <ErrorIcon />, text: 'エラー' };
       default:
-        return { color: '#9E9E9E', icon: <CloudQueue />, text: '不明' };
+        return { color: '#9E9E9E', icon: <CloudQueue />, text: status };
     }
   };
 
-  // ローディング用のスケルトンコンポーネント
   const ModelSkeleton = () => (
     <Box sx={{ width: { xs: '100%', md: '48%', lg: '31%' }, mb: 3 }}>
       <Card elevation={2} sx={{ height: '100%' }}>
@@ -166,7 +178,6 @@ export const DashboardApp = () => {
 
   return (
     <>
-      {/* ヘッダー */}
       <AppBar position="static" sx={{ mb: 4 }}>
         <Toolbar>
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
@@ -184,7 +195,6 @@ export const DashboardApp = () => {
             <CircularProgress size={20} color="inherit" sx={{ mr: 2 }} />
           )}
 
-          {/* ユーザーメニュー */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <Typography variant="body2" color="inherit">
               {user?.name || user?.username}
@@ -200,7 +210,6 @@ export const DashboardApp = () => {
             </IconButton>
           </Box>
 
-          {/* ユーザーメニュー */}
           <Menu
             anchorEl={userMenuAnchor}
             open={Boolean(userMenuAnchor)}
@@ -227,7 +236,6 @@ export const DashboardApp = () => {
       </AppBar>
 
       <Container maxWidth="xl">
-        {/* ウェルカムメッセージ */}
         <Alert severity="success" sx={{ mb: 3 }}>
           <Typography variant="body1">
             <strong>ようこそ、{user?.name || user?.username}さん！</strong>
@@ -237,7 +245,6 @@ export const DashboardApp = () => {
           </Typography>
         </Alert>
 
-        {/* エラー表示 */}
         {(modelsError || instancesError) && (
           <Alert 
             severity="error" 
@@ -259,7 +266,6 @@ export const DashboardApp = () => {
           </Alert>
         )}
 
-        {/* 実行中のインスタンス */}
         {instances.length > 0 && (
           <Box sx={{ mb: 4 }}>
             <Typography variant="h5" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -301,41 +307,79 @@ export const DashboardApp = () => {
                           インスタンスタイプ: {instance.instanceType}
                         </Typography>
                         
-                        <Typography variant="body2" color="text.secondary" gutterBottom>
-                          推定コスト: {instance.estimatedCost}
-                        </Typography>
+                        
                         
                         <Typography variant="body2" color="text.secondary" gutterBottom>
                           開始時刻: {instance.startedAt.toLocaleString()}
                         </Typography>
 
                         {instance.status === 'running' && (
-                          <Paper sx={{ p: 2, mt: 2, backgroundColor: '#f8f9fa' }}>
-                            <Typography variant="subtitle2" gutterBottom>
-                              API エンドポイント:
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              <Typography 
-                                variant="body2" 
-                                sx={{ 
-                                  fontFamily: 'monospace', 
-                                  fontSize: '0.8rem',
-                                  wordBreak: 'break-all',
-                                  flex: 1
-                                }}
-                              >
-                                {instance.endpoint}
+                          <>
+                            <Paper sx={{ p: 2, mt: 2, backgroundColor: '#f8f9fa' }}>
+                              <Typography variant="subtitle2" gutterBottom>
+                                API エンドポイント:
                               </Typography>
-                              <Tooltip title="エンドポイントをコピー">
-                                <IconButton 
-                                  size="small" 
-                                  onClick={() => copyEndpoint(instance.endpoint)}
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography 
+                                  variant="body2" 
+                                  sx={{ 
+                                    fontFamily: 'monospace', 
+                                    fontSize: '0.8rem',
+                                    wordBreak: 'break-all',
+                                    flex: 1
+                                  }}
                                 >
-                                  <ContentCopy fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            </Box>
-                          </Paper>
+                                  {instance.endpoint}
+                                </Typography>
+                                <Tooltip title="エンドポイントをコピー">
+                                  <IconButton 
+                                    size="small" 
+                                    onClick={() => copyEndpoint(instance.endpoint)}
+                                  >
+                                    <ContentCopy fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
+                            </Paper>
+                            <Paper sx={{ p: 2, mt: 1, backgroundColor: '#f8f9fa' }}>
+                              <Typography variant="subtitle2" gutterBottom>
+                                cURL コマンド例:
+                              </Typography>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography 
+                                  variant="body2" 
+                                  component="pre"
+                                  sx={{
+                                    fontFamily: 'monospace', 
+                                    fontSize: '0.8rem',
+                                    wordBreak: 'break-all',
+                                    flex: 1,
+                                    whiteSpace: 'pre-wrap',
+                                    m: 0,
+                                    color: '#333'
+                                  }}
+                                >
+                                  {`curl -X POST "${new URL('api/generate', instance.endpoint)}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"${instance.modelName}","prompt":"Hello","stream":false}'`}
+                                </Typography>
+                                <Tooltip title="cURLコマンドをコピー">
+                                  <IconButton 
+                                    size="small" 
+                                    onClick={() => {
+                                        const apiUrl = new URL('api/generate', instance.endpoint).toString();
+                                        const command = `curl -X POST "${apiUrl}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"${instance.modelName}","prompt":"Hello","stream":false}'`;
+                                        copyToClipboard(command, 'cURLコマンドをコピーしました');
+                                    }}
+                                  >
+                                    <ContentCopy fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                </Box>
+                            </Paper>
+                          </>
                         )}
                       </CardContent>
                       
@@ -358,7 +402,6 @@ export const DashboardApp = () => {
           </Box>
         )}
 
-        {/* 利用可能なモデル */}
         <Typography variant="h5" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <Memory color="primary" />
           利用可能なLLMモデル
@@ -372,12 +415,10 @@ export const DashboardApp = () => {
           justifyContent: 'flex-start'
         }}>
           {modelsLoading ? (
-            // ローディング中はスケルトンを表示
             Array.from({ length: 6 }).map((_, index) => (
               <ModelSkeleton key={index} />
             ))
           ) : models.length === 0 ? (
-            // データが空の場合
             <Box sx={{ width: '100%' }}>
               <Alert severity="info" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Warning />
@@ -385,8 +426,7 @@ export const DashboardApp = () => {
               </Alert>
             </Box>
           ) : (
-            // データがある場合
-            models.map((model) => (
+            models.map((model: LLMModel) => (
               <Box 
                 key={model.id}
                 sx={{ 
@@ -474,29 +514,67 @@ export const DashboardApp = () => {
           )}
         </Box>
 
-        {/* デプロイ確認ダイアログ */}
         <Dialog open={deployDialogOpen} onClose={() => setDeployDialogOpen(false)} maxWidth="sm" fullWidth>
           <DialogTitle>
             {selectedModel?.name} をデプロイ
           </DialogTitle>
           <DialogContent>
             <Alert severity="info" sx={{ mb: 2 }}>
-              このモデルをデプロイすると、AWS ECSでコンテナが起動され、API エンドポイントが生成されます。
+              コンピューティングタイプを選択し、モデルをデプロイします。GPUを選択すると起動に時間がかかる場合があります。
             </Alert>
+
+            <FormControl component="fieldset" sx={{ mt: 2 }}>
+              <FormLabel component="legend">コンピューティングタイプ</FormLabel>
+              <RadioGroup
+                row
+                aria-label="compute type"
+                name="compute-type-group"
+                value={compute}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  const newComputeType = e.target.value;
+                  setCompute(newComputeType);
+                  if (newComputeType === 'gpu') {
+                    setInstanceType('g5.xlarge');
+                  } else {
+                    setInstanceType('{"cpu": 2048, "memory": 8192}');
+                  }
+                }}
+              >
+                <FormControlLabel value="fargate" control={<Radio />} label="Fargate (CPU)" />
+                <FormControlLabel value="gpu" control={<Radio />} label="EC2 (GPU)" />
+              </RadioGroup>
+            </FormControl>
             
             <TextField
               fullWidth
-              label="インスタンスタイプ"
+              label={compute === 'fargate' ? 'vCPU / メモリ' : 'インスタンスタイプ'}
               select
               value={instanceType}
               onChange={(e) => setInstanceType(e.target.value)}
               SelectProps={{ native: true }}
               sx={{ mt: 2 }}
+              helperText={compute === 'gpu' ? 'GPUインスタンスを選択してください' : 'Fargateインスタンスを選択してください'}
             >
-              <option value="ml.m5.large">ml.m5.large (2 vCPU, 8GB RAM) - $0.12/hour</option>
-              <option value="ml.m5.xlarge">ml.m5.xlarge (4 vCPU, 16GB RAM) - $0.24/hour</option>
-              <option value="ml.m5.2xlarge">ml.m5.2xlarge (8 vCPU, 32GB RAM) - $0.48/hour</option>
-              <option value="ml.g4dn.xlarge">ml.g4dn.xlarge (4 vCPU, 16GB RAM, GPU) - $0.71/hour</option>
+              {compute === 'fargate' ? (
+                [
+                  <option key="fargate-1" value='{"cpu": 2048, "memory": 8192}'>2 vCPU / 8GB RAM</option>,
+                  <option key="fargate-2" value='{"cpu": 4096, "memory": 16384}'>4 vCPU / 16GB RAM</option>,
+                  <option key="fargate-3" value='{"cpu": 8192, "memory": 16384}'>8 vCPU / 16GB RAM</option>,
+                  <option key="fargate-4" value='{"cpu": 8192, "memory": 32768}'>8 vCPU / 32GB RAM</option>,
+                  <option key="fargate-5" value='{"cpu": 8192, "memory": 61440}'>8 vCPU / 60GB RAM</option>,
+                  <option key="fargate-6" value='{"cpu": 16384, "memory": 32768}'>16 vCPU / 32GB RAM</option>,
+                  <option key="fargate-7" value='{"cpu": 16384, "memory": 61440}'>16 vCPU / 60GB RAM</option>,
+                  <option key="fargate-8" value='{"cpu": 16384, "memory": 92160}'>16 vCPU / 90GB RAM</option>,
+                  <option key="fargate-9" value='{"cpu": 16384, "memory": 122880}'>16 vCPU / 120GB RAM</option>
+                ]
+              ) : (
+                [
+                  <option key="g5.xlarge" value="g5.xlarge">g5.xlarge (1 GPU, 16GB RAM)</option>,
+                  <option key="g5.2xlarge" value="g5.2xlarge">g5.2xlarge (1 GPU, 32GB RAM)</option>,
+                  <option key="g5.4xlarge" value="g5.4xlarge">g5.4xlarge (1 GPU, 64GB RAM)</option>,
+                  <option key="g6.xlarge" value="g6.xlarge">g6.xlarge (1 GPU, 16GB RAM)</option>
+                ]
+              )}
             </TextField>
             
             {selectedModel && (
@@ -523,7 +601,6 @@ export const DashboardApp = () => {
           </DialogActions>
         </Dialog>
 
-        {/* スナックバー */}
         <Snackbar
           open={snackbarOpen}
           autoHideDuration={4000}

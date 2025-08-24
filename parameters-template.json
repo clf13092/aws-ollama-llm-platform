@@ -12,8 +12,8 @@
     "ParameterValue": "admin@example.com"
   },
   {
-    "ParameterKey": "AdminTemporaryPassword",
-    "ParameterValue": "ChangeMe123!"
+    "ParameterKey": "AdminPassword",
+    "ParameterValue": "AdminPass123!"
   },
   {
     "ParameterKey": "EnableMFA",

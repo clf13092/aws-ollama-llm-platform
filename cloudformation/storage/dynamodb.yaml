@@ -249,105 +249,430 @@ Resources:
           import boto3
           import cfnresponse
           from datetime import datetime, timezone
-          
+          from decimal import Decimal
+
+          def to_dynamo_doc(obj):
+              """
+              - dict/list を再帰的に走査
+              - None はキーごと削除（DynamoDB は None を属性として保存できないため）
+              - float は Decimal に変換（DynamoDB は float 非推奨）
+              """
+              if isinstance(obj, list):
+                  return [to_dynamo_doc(i) for i in obj]
+              if isinstance(obj, dict):
+                  return {k: to_dynamo_doc(v) for k, v in obj.items() if v is not None}
+              if isinstance(obj, float):
+                  return Decimal(str(obj))
+              return obj
+
           def lambda_handler(event, context):
               try:
                   dynamodb = boto3.resource('dynamodb')
                   models_table = dynamodb.Table(event['ResourceProperties']['ModelsTableName'])
-                  
+
                   if event['RequestType'] == 'Create':
-                      # Populate initial model data
-                      initial_models = [
-                          {
-                              'model_id': 'llama2-7b',
-                              'model_name': 'Llama2 7B',
-                              'model_family': 'llama2',
-                              'image_uri': 'ollama/ollama:latest',
-                              'model_size_gb': 4,
-                              'cpu_requirements': {
-                                  'vcpu': 2,
-                                  'memory_mb': 4096
-                              },
-                              'gpu_requirements': {
-                                  'gpu_memory_mb': 8192,
-                                  'gpu_type': 'any'
-                              },
-                              'description': 'Meta Llama 2 7B parameter model for general-purpose use',
-                              'supported_tasks': ['chat', 'completion', 'qa'],
-                              'created_at': datetime.now(timezone.utc).isoformat(),
-                              'is_active': True
-                          },
-                          {
-                              'model_id': 'llama2-13b',
-                              'model_name': 'Llama2 13B',
-                              'model_family': 'llama2',
-                              'image_uri': 'ollama/ollama:latest',
-                              'model_size_gb': 8,
-                              'cpu_requirements': {
-                                  'vcpu': 4,
-                                  'memory_mb': 8192
-                              },
-                              'gpu_requirements': {
-                                  'gpu_memory_mb': 16384,
-                                  'gpu_type': 'any'
-                              },
-                              'description': 'Meta Llama 2 13B parameter model for enhanced performance',
-                              'supported_tasks': ['chat', 'completion', 'qa'],
-                              'created_at': datetime.now(timezone.utc).isoformat(),
-                              'is_active': True
-                          },
-                          {
-                              'model_id': 'codellama-7b',
-                              'model_name': 'Code Llama 7B',
-                              'model_family': 'codellama',
-                              'image_uri': 'ollama/ollama:latest',
-                              'model_size_gb': 4,
-                              'cpu_requirements': {
-                                  'vcpu': 2,
-                                  'memory_mb': 4096
-                              },
-                              'gpu_requirements': {
-                                  'gpu_memory_mb': 8192,
-                                  'gpu_type': 'any'
-                              },
-                              'description': 'Code Llama 7B specialized for code generation and completion',
-                              'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
-                              'created_at': datetime.now(timezone.utc).isoformat(),
-                              'is_active': True
-                          },
-                          {
-                              'model_id': 'mistral-7b',
-                              'model_name': 'Mistral 7B',
-                              'model_family': 'mistral',
-                              'image_uri': 'ollama/ollama:latest',
-                              'model_size_gb': 4,
-                              'cpu_requirements': {
-                                  'vcpu': 2,
-                                  'memory_mb': 4096
-                              },
-                              'gpu_requirements': {
-                                  'gpu_memory_mb': 8192,
-                                  'gpu_type': 'any'
-                              },
-                              'description': 'Mistral 7B high-performance language model',
-                              'supported_tasks': ['chat', 'completion', 'qa'],
-                              'created_at': datetime.now(timezone.utc).isoformat(),
-                              'is_active': True
-                          }
+                      now_iso = datetime.now(timezone.utc).isoformat()
+
+                      initial_models_raw = [
+                        # ====== BEGIN DEFAULT_MODELS ======
+                        {
+                            'model_id': 'llama3.1:8b',  # instruct推奨
+                            'model_name': 'Llama 3.1 8B',
+                            'model_family': 'llama3.1',
+                            'image_uri': None,
+                            'model_size_gb': 4.7,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 8192},
+                            'gpu_requirements': {'gpu_memory_mb': 12288, 'gpu_type': 'any'},
+                            'description': 'Meta Llama 3.1 (8B, instruct recommended)',
+                            'supported_tasks': ['chat', 'completion', 'qa', 'tool-use'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'llama3.1:70b',
+                            'model_name': 'Llama 3.1 70B',
+                            'model_family': 'llama3.1',
+                            'image_uri': None,
+                            'model_size_gb': 40.0,
+                            'cpu_requirements': {'vcpu': 32, 'memory_mb': 131072},
+                            'gpu_requirements': {'gpu_memory_mb': 65536, 'gpu_type': 'any'},
+                            'description': 'Meta Llama 3.1 (70B)',
+                            'supported_tasks': ['chat', 'completion', 'qa', 'tool-use'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Llama 3.2 (small & vision) ----
+                        {
+                            'model_id': 'llama3.2:1b',
+                            'model_name': 'Llama 3.2 1B',
+                            'model_family': 'llama3.2',
+                            'image_uri': None,
+                            'model_size_gb': 1.3,
+                            'cpu_requirements': {'vcpu': 2, 'memory_mb': 4096},
+                            'gpu_requirements': {'gpu_memory_mb': 4096, 'gpu_type': 'any'},
+                            'description': 'Meta Llama 3.2 (1B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'llama3.2:3b',
+                            'model_name': 'Llama 3.2 3B',
+                            'model_family': 'llama3.2',
+                            'image_uri': None,
+                            'model_size_gb': 2.0,
+                            'cpu_requirements': {'vcpu': 2, 'memory_mb': 4096},
+                            'gpu_requirements': {'gpu_memory_mb': 8192, 'gpu_type': 'any'},
+                            'description': 'Meta Llama 3.2 (3B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'llama3.2-vision:11b',
+                            'model_name': 'Llama 3.2 Vision 11B',
+                            'model_family': 'llama3.2-vision',
+                            'image_uri': None,
+                            'model_size_gb': 7.9,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 16384},
+                            'gpu_requirements': {'gpu_memory_mb': 16384, 'gpu_type': 'any'},
+                            'description': 'Llama 3.2 Vision (11B)',
+                            'supported_tasks': ['vision', 'chat', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'llama3.2-vision:90b',
+                            'model_name': 'Llama 3.2 Vision 90B',
+                            'model_family': 'llama3.2-vision',
+                            'image_uri': None,
+                            'model_size_gb': 35.0,
+                            'cpu_requirements': {'vcpu': 16, 'memory_mb': 65536},
+                            'gpu_requirements': {'gpu_memory_mb': 65536, 'gpu_type': 'any'},
+                            'description': 'Llama 3.2 Vision (90B)',
+                            'supported_tasks': ['vision', 'chat', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Mistral / Mixtral ----
+                        {
+                            'model_id': 'mistral:7b',
+                            'model_name': 'Mistral 7B',
+                            'model_family': 'mistral',
+                            'image_uri': None,
+                            'model_size_gb': 4.4,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 8192},
+                            'gpu_requirements': {'gpu_memory_mb': 8192, 'gpu_type': 'any'},
+                            'description': 'Mistral 7B (instruct default; function calling in v0.3)',
+                            'supported_tasks': ['chat', 'completion', 'qa', 'tool-use'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'mixtral:8x7b',
+                            'model_name': 'Mixtral 8x7B',
+                            'model_family': 'mixtral',
+                            'image_uri': None,
+                            'model_size_gb': 26.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 24576, 'gpu_type': 'any'},
+                            'description': 'Sparse MoE (8x7B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'mixtral:8x22b',
+                            'model_name': 'Mixtral 8x22B',
+                            'model_family': 'mixtral',
+                            'image_uri': None,
+                            'model_size_gb': 41.0,
+                            'cpu_requirements': {'vcpu': 16, 'memory_mb': 65536},
+                            'gpu_requirements': {'gpu_memory_mb': 49152, 'gpu_type': 'any'},
+                            'description': 'Sparse MoE (8x22B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Google Gemma 2 ----
+                        {
+                            'model_id': 'gemma2:2b',
+                            'model_name': 'Gemma 2 2B',
+                            'model_family': 'gemma2',
+                            'image_uri': None,
+                            'model_size_gb': 2.5,
+                            'cpu_requirements': {'vcpu': 2, 'memory_mb': 4096},
+                            'gpu_requirements': {'gpu_memory_mb': 4096, 'gpu_type': 'any'},
+                            'description': 'Gemma 2 (2B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'gemma2:9b',
+                            'model_name': 'Gemma 2 9B',
+                            'model_family': 'gemma2',
+                            'image_uri': None,
+                            'model_size_gb': 5.4,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 12288},
+                            'gpu_requirements': {'gpu_memory_mb': 16384, 'gpu_type': 'any'},
+                            'description': 'Gemma 2 (9B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'gemma2:27b',
+                            'model_name': 'Gemma 2 27B',
+                            'model_family': 'gemma2',
+                            'image_uri': None,
+                            'model_size_gb': 19.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 32768, 'gpu_type': 'any'},
+                            'description': 'Gemma 2 (27B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Alibaba Qwen 2.5 ----
+                        {
+                            'model_id': 'qwen2.5:0.5b',
+                            'model_name': 'Qwen2.5 0.5B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 0.8,
+                            'cpu_requirements': {'vcpu': 1, 'memory_mb': 2048},
+                            'gpu_requirements': {'gpu_memory_mb': 3072, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (0.5B)',
+                            'supported_tasks': ['chat', 'completion'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5:1.5b',
+                            'model_name': 'Qwen2.5 1.5B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 0.9,
+                            'cpu_requirements': {'vcpu': 1, 'memory_mb': 3072},
+                            'gpu_requirements': {'gpu_memory_mb': 4096, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (1.5B)',
+                            'supported_tasks': ['chat', 'completion'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5:7b',
+                            'model_name': 'Qwen2.5 7B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 4.5,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 8192},
+                            'gpu_requirements': {'gpu_memory_mb': 12288, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (7B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5:14b',
+                            'model_name': 'Qwen2.5 14B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 9.0,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 16384},
+                            'gpu_requirements': {'gpu_memory_mb': 20480, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (14B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5:32b',
+                            'model_name': 'Qwen2.5 32B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 18.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 32768, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (32B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5:72b',
+                            'model_name': 'Qwen2.5 72B',
+                            'model_family': 'qwen2.5',
+                            'image_uri': None,
+                            'model_size_gb': 40.0,
+                            'cpu_requirements': {'vcpu': 16, 'memory_mb': 65536},
+                            'gpu_requirements': {'gpu_memory_mb': 81920, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 (72B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5-vl:7b',
+                            'model_name': 'Qwen2.5-VL 7B',
+                            'model_family': 'qwen2.5-vl',
+                            'image_uri': None,
+                            'model_size_gb': 10.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 24576, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5-VL (multimodal 7B)',
+                            'supported_tasks': ['vision', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'qwen2.5-coder:7b',
+                            'model_name': 'Qwen2.5 Coder 7B',
+                            'model_family': 'qwen2.5-coder',
+                            'image_uri': None,
+                            'model_size_gb': 5.5,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 8192},
+                            'gpu_requirements': {'gpu_memory_mb': 12288, 'gpu_type': 'any'},
+                            'description': 'Qwen2.5 Coder (7B)',
+                            'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Microsoft Phi ----
+                        {
+                            'model_id': 'phi4:14b',
+                            'model_name': 'Phi-4 14B',
+                            'model_family': 'phi4',
+                            'image_uri': None,
+                            'model_size_gb': 9.1,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 12288},
+                            'gpu_requirements': {'gpu_memory_mb': 16384, 'gpu_type': 'any'},
+                            'description': 'Microsoft Phi-4 (14B)',
+                            'supported_tasks': ['chat', 'completion', 'qa', 'reasoning'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'phi4-mini:3.8b',
+                            'model_name': 'Phi-4 Mini 3.8B',
+                            'model_family': 'phi4-mini',
+                            'image_uri': None,
+                            'model_size_gb': 2.5,
+                            'cpu_requirements': {'vcpu': 2, 'memory_mb': 4096},
+                            'gpu_requirements': {'gpu_memory_mb': 8192, 'gpu_type': 'any'},
+                            'description': 'Phi-4 Mini (3.8B, 128K ctx)',
+                            'supported_tasks': ['chat', 'completion', 'qa', 'reasoning'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- DeepSeek Reasoning ----
+                        {
+                            'model_id': 'deepseek-r1:7b',
+                            'model_name': 'DeepSeek-R1 7B',
+                            'model_family': 'deepseek-r1',
+                            'image_uri': None,
+                            'model_size_gb': 5.2,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 12288},
+                            'gpu_requirements': {'gpu_memory_mb': 16384, 'gpu_type': 'any'},
+                            'description': 'DeepSeek-R1 Reasoning (7B)',
+                            'supported_tasks': ['chat', 'reasoning', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'deepseek-r1:14b',
+                            'model_name': 'DeepSeek-R1 14B',
+                            'model_family': 'deepseek-r1',
+                            'image_uri': None,
+                            'model_size_gb': 10.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 16384},
+                            'gpu_requirements': {'gpu_memory_mb': 24576, 'gpu_type': 'any'},
+                            'description': 'DeepSeek-R1 Reasoning (14B)',
+                            'supported_tasks': ['chat', 'reasoning', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Code Llama (legacy but still in library) ----
+                        {
+                            'model_id': 'codellama:7b',
+                            'model_name': 'Code Llama 7B',
+                            'model_family': 'codellama',
+                            'image_uri': None,
+                            'model_size_gb': 4.0,
+                            'cpu_requirements': {'vcpu': 2, 'memory_mb': 4096},
+                            'gpu_requirements': {'gpu_memory_mb': 8192, 'gpu_type': 'any'},
+                            'description': 'Code Llama 7B',
+                            'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'codellama:13b',
+                            'model_name': 'Code Llama 13B',
+                            'model_family': 'codellama',
+                            'image_uri': None,
+                            'model_size_gb': 7.2,
+                            'cpu_requirements': {'vcpu': 4, 'memory_mb': 8192},
+                            'gpu_requirements': {'gpu_memory_mb': 16384, 'gpu_type': 'any'},
+                            'description': 'Code Llama 13B',
+                            'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'codellama:34b',
+                            'model_name': 'Code Llama 34B',
+                            'model_family': 'codellama',
+                            'image_uri': None,
+                            'model_size_gb': 20.0,
+                            'cpu_requirements': {'vcpu': 16, 'memory_mb': 65536},
+                            'gpu_requirements': {'gpu_memory_mb': 40960, 'gpu_type': 'any'},
+                            'description': 'Code Llama 34B',
+                            'supported_tasks': ['code_completion', 'code_generation', 'code_explanation'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- Cohere (license注意) ----
+                        {
+                            'model_id': 'command-r:latest',
+                            'model_name': 'Command R',
+                            'model_family': 'command-r',
+                            'image_uri': None,
+                            'model_size_gb': 35.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 32768, 'gpu_type': 'any'},
+                            'description': 'Cohere Command R (license注意)',
+                            'supported_tasks': ['chat', 'qa', 'tool-use'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+                        {
+                            'model_id': 'command-r-plus:latest',
+                            'model_name': 'Command R+',
+                            'model_family': 'command-r',
+                            'image_uri': None,
+                            'model_size_gb': 59.0,
+                            'cpu_requirements': {'vcpu': 16, 'memory_mb': 65536},
+                            'gpu_requirements': {'gpu_memory_mb': 65536, 'gpu_type': 'any'},
+                            'description': 'Cohere Command R+ (license注意)',
+                            'supported_tasks': ['chat', 'qa', 'tool-use'],
+                            'created_at': now_iso, 'is_active': True
+                        },
+
+                        # ---- OpenAI GPT-OSS (open weights) ----
+                        {
+                            'model_id': 'gpt-oss:20b',
+                            'model_name': 'GPT-OSS 20B',
+                            'model_family': 'gpt-oss',
+                            'image_uri': None,
+                            'model_size_gb': 21.0,
+                            'cpu_requirements': {'vcpu': 8, 'memory_mb': 32768},
+                            'gpu_requirements': {'gpu_memory_mb': 24576, 'gpu_type': 'any'},
+                            'description': 'OpenAI GPT-OSS (20B)',
+                            'supported_tasks': ['chat', 'completion', 'qa'],
+                            'created_at': now_iso, 'is_active': True
+                        }
                       ]
-                      
-                      # Batch write items
+                        # ====== END DEFAULT_MODELS ======
+
+                      # None 除去 + float→Decimal 変換
+                      initial_models = to_dynamo_doc(initial_models_raw)
+
+                      # DynamoDB へ投入（batch_writer は自動で分割・リトライ）
                       with models_table.batch_writer() as batch:
                           for model in initial_models:
                               batch.put_item(Item=model)
-                      
+
                       print(f"Successfully populated {len(initial_models)} initial models")
-                  
+
+                  # どのリクエストタイプでも SUCCESS を返す（必要に応じて分岐を拡張）
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-                  
+
               except Exception as e:
                   print(f"Error: {str(e)}")
                   cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
 
   PopulateDataLambdaRole:
     Type: AWS::IAM::Role

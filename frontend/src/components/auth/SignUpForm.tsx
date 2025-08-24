@@ -7,7 +7,6 @@ import {
   Button,
   Typography,
   Alert,
-  Link,
   CircularProgress
 } from '@mui/material';
 import { PersonAdd as SignUpIcon, ArrowBack as BackIcon } from '@mui/icons-material';
@@ -222,15 +221,14 @@ export const SignUpForm = ({ onSwitchToLogin, onSwitchToConfirm }: SignUpFormPro
 
           {/* 戻るリンク */}
           <Box sx={{ textAlign: 'center' }}>
-            <Link
-              component="button"
-              variant="body2"
+            <Button
+              variant="text"
               onClick={onSwitchToLogin}
               startIcon={<BackIcon />}
               sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}
             >
               ログイン画面に戻る
-            </Link>
+            </Button>
           </Box>
 
           {/* 注意事項 */}

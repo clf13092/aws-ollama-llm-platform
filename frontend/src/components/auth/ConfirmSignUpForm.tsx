@@ -7,7 +7,6 @@ import {
   Button,
   Typography,
   Alert,
-  Link,
   CircularProgress
 } from '@mui/material';
 import { VerifiedUser as VerifyIcon, ArrowBack as BackIcon } from '@mui/icons-material';
@@ -180,24 +179,22 @@ export const ConfirmSignUpForm = ({ username, onSwitchToLogin, onSwitchToSignUp 
               認証コードが届かない場合は、迷惑メールフォルダをご確認ください。
             </Typography>
             
-            <Link
-              component="button"
-              variant="body2"
+            <Button
+              variant="text"
               onClick={onSwitchToSignUp}
               sx={{ display: 'block', mb: 1 }}
             >
               別のメールアドレスで登録し直す
-            </Link>
+            </Button>
             
-            <Link
-              component="button"
-              variant="body2"
+            <Button
+              variant="text"
               onClick={onSwitchToLogin}
               startIcon={<BackIcon />}
               sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}
             >
               ログイン画面に戻る
-            </Link>
+            </Button>
           </Box>
         </CardContent>
       </Card>
