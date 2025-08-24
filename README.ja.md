@@ -11,9 +11,12 @@
 
 ## 🎯 概要
 
-このプロジェクトは、Ollama大規模言語モデル（LLM）を動的にデプロイ・管理するための完全なAWSベースソリューションを提供します。ユーザーは、完全な認証機能、自動エンドポイント生成、包括的なモニタリングを備えた安全なWebベースの管理インターフェースを通じて、任意のモデルとインスタンスタイプを選択できます。
+このプロジェクトは、Ollama大規模言語モデル（LLM）を動的にデプロイ・管理するための完全なAWSベースソリューションを提供します。ユーザーは、完全な認証機能、自動エンドポイント生成、包括的なモニタリングを備えた安全なWebベースの管理インターフェースを通じて、任意のモデルとコンピューティングリソースを柔軟に選択できます。
 
-**主要機能:**
+## ✨ 特徴
+
+- **柔軟なコンピューティング選択:** モデルのデプロイ時に、**Fargate (CPU)** または **EC2 (GPU)** を柔軟に選択可能。
+- **動的なリソース指定:** FargateではvCPUとメモリの組み合わせを、GPUではインスタンスタイプをプルダウンから選択し、モデルの要求スペックに合わせたデプロイが可能です。
 - 🔒 **セキュアな認証**: AWS Cognitoによるユーザー管理
 - 🔄 **動的LLMデプロイメント** ECS（Fargate/EC2）経由
 - 🖥️ **Webベース管理ダッシュボード**（React.js）
@@ -74,80 +77,66 @@ graph TB
         Cognito --> IdentityPool
     end
 ```
+API Handler Lambdaは、ユーザーがUIから指定したコンピューティングタイプ（FargateまたはGPU）に応じて、実行するECSタスクの起動タイプやキャパシティプロバイダーを動的に切り替えます。Fargateの場合は指定されたvCPU・メモリでタスク定義を作成し、GPUの場合はEC2インスタンス上で指定された数のGPUリソースをコンテナに割り当てます。これにより、コストとパフォーマンスのバランスを取りながら、多様なモデルを効率的に実行できるアーキテクチャとなっています。
 
 ## 🚀 クイックスタート
 
+このプロジェクトには、DockerイメージのビルドからAWSインフラストラクチャ、フロントエンド資産のデプロイまで、セットアッププロセス全体を自動化する包括的なデプロイスクリプトが含まれています。
+
 ### 前提条件
-- 適切な権限を持つAWSアカウント
-- 設定済みのAWS CLI
-- ドメイン名（オプション、カスタムエンドポイント用）
-- 管理者アカウント用のメールアドレス
 
-### 1. インフラストラクチャのデプロイ
+-   **AWSアカウント**: 後述するリソースを作成するための権限を持つAWSアカウント。初回デプロイ時には、IAMロールを含むすべての必要なリソースをスクリプトが作成できるよう、管理者レベルの権限（`AdministratorAccess`管理ポリシーなど）が推奨されます。
+-   **AWS CLI**: AWSコマンドラインインターフェースがインストールされ、認証情報が設定されていること。未設定の場合は `aws configure` を実行してください。
+-   **Docker**: コンテナイメージをビルドしプッシュするために、Dockerがローカルマシンにインストールされ、実行されていること。
+-   **Node.js & npm**: フロントエンドアプリケーションのビルドに必要です。
 
-```bash
-# リポジトリをクローン
-git clone https://github.com/clf13092/aws-ollama-llm-platform.git
-cd aws-ollama-llm-platform
+### デプロイ手順
 
-# パラメータファイルを作成
-cat > parameters.json << EOF
-[
-  {
-    "ParameterKey": "Environment",
-    "ParameterValue": "production"
-  },
-  {
-    "ParameterKey": "DomainName",
-    "ParameterValue": "ollama.yourdomain.com"
-  },
-  {
-    "ParameterKey": "AdminEmail",
-    "ParameterValue": "admin@yourdomain.com"
-  },
-  {
-    "ParameterKey": "EnableMFA",
-    "ParameterValue": "false"
-  }
-]
-EOF
+1.  **リポジトリをクローン**
+    ```bash
+    git clone https://github.com/clf13092/aws-ollama-llm-platform.git
+    cd aws-ollama-llm-platform
+    ```
 
-# スタックをデプロイ
-aws cloudformation create-stack \
-  --stack-name aws-ollama-platform \
-  --template-body file://cloudformation/main.yaml \
-  --parameters file://parameters.json \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+2.  **パラメータを設定**
+    デプロイスクリプトは設定用に `parameters.json` ファイルを使用します。テンプレートとして `parameters-template.json` が提供されています。
+    ```bash
+    # テンプレートからパラメータファイルを作成
+    cp parameters-template.json parameters.json
+    ```
+    次に、`parameters.json` を編集し、`DomainName` や `AdminEmail` など、お好みの設定を行ってください。
 
-# 初期管理者ユーザーを作成（スタックデプロイ完了後）
-aws cognito-idp admin-create-user \
-  --user-pool-id <USER_POOL_ID> \
-  --username admin \
-  --user-attributes Name=email,Value=admin@yourdomain.com \
-  --temporary-password TempPass123! \
-  --message-action SUPPRESS
-```
+3.  **デプロイスクリプトを実行**
+    メインのデプロイスクリプトを実行します。これにより、すべての処理が自動的に行われます。
+    ```bash
+    sh scripts/deploy.sh
+    ```
+    このスクリプトは以下の処理を実行します：
+    - 全てのCloudFormationスタックをパッケージ化し、デプロイします。
+    - OllamaのDockerコンテナをビルドし、新しいECRリポジトリにプッシュします。
+    - Reactフロントエンドをビルドします。
+    - フロントエンドの資産をS3にアップロードします。
+    - 完了後、アプリケーションのURLが出力されます。
 
-### 2. 管理インターフェースへのアクセス
+### 必要なIAM権限
 
-デプロイ完了後（約15-20分）：
+デプロイスクリプトは多数のAWSリソースをプロビジョニングします。スクリプトを実行するIAMプリンシパル（ユーザーまたはロール）には、以下のサービスに対する権限が必要です。
 
-1. **スタック出力からCloudFront URLを取得**
-2. **ブラウザで管理インターフェースを開く**
-3. **管理者認証情報でログイン**：
-   - ユーザー名: `admin`
-   - 一時パスワード: `TempPass123!`
-4. **プロンプトに従って永続パスワードを設定**
-5. **ダッシュボードにアクセス**してLLMモデルを管理
+-   AWS CloudFormation
+-   Amazon S3
+-   Amazon IAM
+-   Amazon ECR (Elastic Container Registry)
+-   Amazon ECS (Elastic Container Service)
+-   Amazon EC2 (VPC, セキュリティグループ等)
+-   Amazon DynamoDB
+-   Amazon Cognito
+-   Amazon API Gateway
+-   AWS Lambda
+-   Amazon CloudFront
+-   Amazon Route 53 (DNS設定を有効化した場合)
+-   AWS STS
 
-### 3. 最初のモデルをデプロイ
-
-1. **ダッシュボードにログイン**
-2. **「モデル」セクションに移動**
-3. **モデルを選択**（例：Llama2 7B、CodeLlama 13B）
-4. **インスタンスタイプを選択**（要件に応じてCPU/GPU）
-5. **「モデルをデプロイ」をクリック**
-6. **インスタンス一覧からAPIエンドポイントURLを取得**
+特にIAMロールの作成など、広範な権限が必要となるため、初回のセットアップには `AdministratorAccess` 管理ポリシーを持つIAMユーザーまたはロールを使用することを推奨します。
 
 ## 🔒 認証・セキュリティ
 
@@ -170,7 +159,7 @@ aws cognito-idp admin-create-user \
 - **全体的HTTPS**: すべての通信で転送中暗号化
 - **VPC分離**: プライベートサブネット内のコンピューティングリソース
 - **ネットワークセキュリティ**: 最小権限アクセスのセキュリティグループ
-- **IAMポリシー**: すべてのAWSリソースで最小権限の原則
+- **IAMポリシー**: すべてのAWSリソースの最小権限の原則
 
 ## 📊 コンポーネント詳細
 
